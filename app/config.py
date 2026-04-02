@@ -29,5 +29,15 @@ class Config:
     NORMALIZATION_CODEC: str = "pcm_s16le"
     NORMALIZATION_OVERWRITE_POLICY: str = "replace_existing_output"
 
+    TRANSCRIPT_DIR_NAME: str = "transcript"
+    TRANSCRIPT_RAW_FILE_NAME: str = "transcript_raw.txt"
+    TRANSCRIPTION_METADATA_FILE_NAME: str = "transcription.json"
+    TRANSCRIPTION_MODEL: str = "gpt-4o-mini-transcribe"
+
 
 config = Config()
+
+TRANSCRIPT_DIR_NAME = config.TRANSCRIPT_DIR_NAME
+TRANSCRIPT_RAW_FILE_NAME = config.TRANSCRIPT_RAW_FILE_NAME
+TRANSCRIPTION_METADATA_FILE_NAME = config.TRANSCRIPTION_METADATA_FILE_NAME
+TRANSCRIPTION_MODEL = config.TRANSCRIPTION_MODEL
