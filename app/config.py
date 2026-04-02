@@ -66,3 +66,13 @@ ALLOWED_DOCUMENT_ROLES = {
 }
 
 DOCUMENT_INTAKE_STATUS = "document_intake_completed"
+
+CLEANUP_MODEL = "gpt-4o-mini"  # or your chosen model
+TRANSFORMATION_MODE = "faithful_cleanup"
+
+TRANSCRIPT_RAW = "transcript_raw.txt"
+TRANSCRIPT_CLEAN = "transcript_clean.txt"
+CLEANUP_METADATA = "cleanup.json"
+
+CLEANUP_CHUNK_SIZE = 4000  # chars
+CLEANUP_MIN_RATIO = 0.6
