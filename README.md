@@ -121,3 +121,34 @@ python scripts/test_audio_intake.py "C:\path\to\meeting.m4a"
 
 `FileExistsError`
 - unlikely due to UUID suffix; rerun once if it happens
+
+## Phase 2 Audio Normalization
+
+Normalize Phase 01 source audio into:
+- `data/processed/<meeting_id>/normalized/audio.wav`
+- `data/processed/<meeting_id>/metadata/normalization.json`
+
+Normalization spec:
+- mono
+- 16000 Hz
+- PCM 16-bit (`pcm_s16le`)
+
+Overwrite policy:
+- `replace_existing_output` (existing `normalized/audio.wav` is replaced)
+
+Run:
+
+```powershell
+python scripts/test_audio_normalization.py "<meeting_id>"
+```
+
+Validate output audio format:
+
+```powershell
+ffprobe -v error -select_streams a:0 -show_entries stream=codec_name,sample_rate,channels -of default=nw=1:nk=1 "data/processed/<meeting_id>/normalized/audio.wav"
+```
+
+Expected ffprobe values:
+- `pcm_s16le`
+- `16000`
+- `1`
