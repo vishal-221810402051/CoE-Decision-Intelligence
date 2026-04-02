@@ -41,3 +41,28 @@ TRANSCRIPT_DIR_NAME = config.TRANSCRIPT_DIR_NAME
 TRANSCRIPT_RAW_FILE_NAME = config.TRANSCRIPT_RAW_FILE_NAME
 TRANSCRIPTION_METADATA_FILE_NAME = config.TRANSCRIPTION_METADATA_FILE_NAME
 TRANSCRIPTION_MODEL = config.TRANSCRIPTION_MODEL
+
+DATA_PATH = Path("data")
+
+CONTEXT_DOCS_PATH = DATA_PATH / "context_docs"
+
+DOCS_DIR_NAME = "docs"
+DOC_SOURCE_DIR_NAME = "source"
+DOC_METADATA_DIR_NAME = "metadata"
+
+DOC_STORED_BASENAME = "source"
+DOCUMENT_INTAKE_METADATA_FILE_NAME = "document_intake.json"
+
+ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+ALLOWED_DOCUMENT_SCOPES = {"meeting", "mission"}
+ALLOWED_DOCUMENT_ROLES = {
+    "mou",
+    "partnership_note",
+    "governance_doc",
+    "curriculum_doc",
+    "infrastructure_doc",
+    "strategy_note",
+    "general_reference"
+}
+
+DOCUMENT_INTAKE_STATUS = "document_intake_completed"
