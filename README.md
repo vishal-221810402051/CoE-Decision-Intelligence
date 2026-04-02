@@ -152,3 +152,26 @@ Expected ffprobe values:
 - `pcm_s16le`
 - `16000`
 - `1`
+
+## Phase 6 Decision Intelligence Extraction
+
+Convert cleaned transcript text into structured, transcript-grounded intelligence.
+
+Input:
+- `data/processed/<meeting_id>/transcript/transcript_clean.txt`
+
+Outputs:
+- `data/processed/<meeting_id>/intelligence/intelligence.json`
+- `data/processed/<meeting_id>/metadata/intelligence_metadata.json`
+
+Run:
+
+```powershell
+python scripts/test_intelligence_extraction.py "<meeting_id>"
+```
+
+Validation:
+- strict schema output
+- verbatim evidence snippets only
+- deterministic multi-pass extraction
+- fail-closed on invalid JSON, schema, evidence, or summary
