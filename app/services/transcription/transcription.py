@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from openai import OpenAI
+from pydub import AudioSegment
 
 from app.config import (
     TRANSCRIPT_DIR_NAME,
@@ -19,6 +20,18 @@ class TranscriptionService:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is missing in environment")
         self.client = OpenAI(api_key=api_key)
+
+    def split_audio(self, audio_path, chunk_length_ms=5 * 60 * 1000):
+        audio = AudioSegment.from_wav(audio_path)
+
+        chunks = []
+        for i in range(0, len(audio), chunk_length_ms):
+            chunk = audio[i:i + chunk_length_ms]
+            chunk_path = f"{audio_path}_chunk_{i}.wav"
+            chunk.export(chunk_path, format="wav")
+            chunks.append(chunk_path)
+
+        return chunks
 
     def transcribe_meeting(self, meeting_id: str):
         meeting_path = os.path.join(BASE_PROCESSED_DIR, meeting_id)
@@ -43,16 +56,24 @@ class TranscriptionService:
         )
 
         started_at = datetime.utcnow().isoformat()
+        chunk_paths = []
 
         try:
-            with open(audio_path, "rb") as audio_file:
-                response = self.client.audio.transcriptions.create(
-                    model=TRANSCRIPTION_MODEL,
-                    file=audio_file
-                )
+            chunk_paths = self.split_audio(audio_path)
 
-            transcript_text = response.text
+            full_transcript = ""
+            for chunk in chunk_paths:
+                with open(chunk, "rb") as f:
+                    response = self.client.audio.transcriptions.create(
+                        model=TRANSCRIPTION_MODEL,
+                        file=f
+                    )
 
+                full_transcript += response.text + "\n"
+
+                os.remove(chunk)  # cleanup
+
+            transcript_text = full_transcript.strip()
             if not transcript_text or transcript_text.strip() == "":
                 raise RuntimeError("Empty transcription received")
 
@@ -82,5 +103,9 @@ class TranscriptionService:
             # cleanup if partial file exists
             if os.path.exists(transcript_file_path):
                 os.remove(transcript_file_path)
+
+            for chunk in chunk_paths:
+                if os.path.exists(chunk):
+                    os.remove(chunk)
 
             raise RuntimeError(f"Transcription failed: {str(e)}")
