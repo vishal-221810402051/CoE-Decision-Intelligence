@@ -196,3 +196,24 @@ Run:
 ```powershell
 python scripts/test_executive_intelligence.py "<meeting_id>"
 ```
+
+## Phase 09 Decision Intelligence v2
+
+Build an operational decision ledger from transcript and intelligence artifacts.
+
+Inputs:
+- `data/processed/<meeting_id>/transcript/transcript_raw.txt`
+- `data/processed/<meeting_id>/transcript/transcript_clean.txt`
+- `data/processed/<meeting_id>/transcript/intelligence.json`
+- `data/processed/<meeting_id>/executive/executive_intelligence.json`
+- `data/context/mission_registry.json`
+
+Outputs:
+- `data/processed/<meeting_id>/decision/decision_intelligence_v2.json`
+- `data/processed/<meeting_id>/metadata/decision_v2_metadata.json`
+
+Run:
+
+```powershell
+python scripts/test_decision_intelligence.py "<meeting_id>"
+```
