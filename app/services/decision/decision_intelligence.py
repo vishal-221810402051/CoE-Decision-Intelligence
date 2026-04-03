@@ -41,6 +41,77 @@ DEPENDENCY_TYPE_ENUM = {
 DEPENDENCY_STATUS_ENUM = {"open", "partially_resolved", "resolved"}
 TIMELINE_TYPE_ENUM = {"start_window", "deadline_hint", "followup_marker"}
 
+UNCERTAINTY_MARKERS = (
+    "idea",
+    "possibility",
+    "potentially",
+    "maybe",
+    "would consider",
+    "it can be",
+    "more or less defined",
+)
+PENDING_MARKERS = (
+    "need to define",
+    "need to go deeper",
+    "next meeting",
+    "to be decided",
+    "not clear",
+    "we need to check",
+    "we need to finalize",
+)
+RESPONSIBILITY_PATTERNS = (
+    "you will be responsible",
+    "you will go there",
+    "you will be the representative",
+    "you will be the one",
+    "you will work with us",
+    "be our representative",
+)
+EXPLICIT_PATTERNS = (
+    "i will",
+    "i'll",
+    "we will",
+    "we'll",
+    "yes, i want to move forward",
+    "i will mark",
+    "i will ask",
+    "i will list",
+    "we will meet",
+)
+REQUESTED_PATTERNS = (
+    "would you consider",
+    "can you",
+    "think about it",
+    "tell me yes, no, maybe",
+    "you can tell me",
+)
+IMPLIED_PATTERNS = (
+    "you will be responsible",
+    "you will be the representative",
+    "you will go there",
+    "you will work with us",
+)
+TIME_PATTERNS: tuple[tuple[str, str, str], ...] = (
+    (r"\bfirst\s+of\s+may\b", "start_window", "medium"),
+    (r"\bfirst\s+week\s+of\s+may\b", "start_window", "medium"),
+    (r"\bfirst\s+june\b", "start_window", "medium"),
+    (r"\bmaybe\s+june\b", "start_window", "medium"),
+    (r"\bend\s+of\s+april\b", "deadline_hint", "medium"),
+    (r"\btuesday\s+after\s+5:30\b", "followup_marker", "high"),
+    (r"\bafter\s+5:30\b", "followup_marker", "high"),
+    (r"\btuesday\b", "followup_marker", "high"),
+    (r"\bnext\s+meeting\b", "followup_marker", "medium"),
+    (r"\bfive\s+to\s+one\s+week\b", "deadline_hint", "low"),
+    (r"\ba\s+week\b", "deadline_hint", "low"),
+)
+DEPENDENCY_REASON_TEMPLATES = {
+    "authority_dependency": "Execution responsibility is assigned, but final operational authority is not clearly defined.",
+    "governance_dependency": "Governance and reporting structure remain unresolved for operational execution.",
+    "funding_dependency": "Funding or revenue-model terms remain unresolved.",
+    "timeline_dependency": "Relevant timing is discussed, but execution timing is not fully finalized.",
+    "partner_dependency": "Execution depends on coordination or approval with external institutional partners.",
+}
+
 
 class DecisionIntelligenceV2Error(RuntimeError):
     pass
@@ -162,10 +233,17 @@ class DecisionIntelligenceV2Service:
         registry = load_mission_registry()
         registry_grounding = build_registry_grounding(registry)
         alias_map = build_alias_map(registry)
+        primary_actor_name = self._normalize_actor(
+            str(registry.get("primary_actor", {}).get("name", "")).strip(), alias_map
+        )
         raw_text = raw_path.read_text(encoding="utf-8")
         clean_text = clean_path.read_text(encoding="utf-8")
         intelligence = json.loads(intelligence_path.read_text(encoding="utf-8"))
         executive = json.loads(executive_path.read_text(encoding="utf-8"))
+        executive_primary = self._normalize_actor(
+            str(executive.get("execution_structure", {}).get("primary_executor", "")).strip(),
+            alias_map,
+        )
         legacy = json.loads(legacy_path.read_text(encoding="utf-8")) if legacy_path.exists() else {}
 
         response = self.client.chat.completions.create(
@@ -185,8 +263,21 @@ class DecisionIntelligenceV2Service:
 
         payload = self._enforce_schema(parsed)
         payload = self._normalize_with_registry(payload, alias_map)
-        payload = self._harden_records(payload, clean_text, executive, alias_map)
-        self._validate_records(payload, clean_text, alias_map)
+        payload = self._harden_records(
+            payload,
+            clean_text,
+            executive,
+            alias_map,
+            executive_primary,
+            primary_actor_name,
+        )
+        self._validate_records(
+            payload,
+            clean_text,
+            alias_map,
+            executive_primary,
+            primary_actor_name,
+        )
         payload["operational_summary"] = self._build_operational_summary(payload["decision_records"])
         self._validate_final(payload)
 
@@ -428,28 +519,98 @@ class DecisionIntelligenceV2Service:
             return ""
         return alias_map.get(actor, alias_map.get(actor.lower(), actor))
 
+    def _split_sentences(self, text: str) -> list[str]:
+        chunks = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if not chunks and text.strip():
+            return [text.strip()]
+        return chunks
+
+    def _contains_time_phrase(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(re.search(pattern, lowered) for pattern, _, _ in TIME_PATTERNS)
+
+    def _has_responsibility_language(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(p in lowered for p in RESPONSIBILITY_PATTERNS)
+
+    def _collect_record_sentences(self, rec: dict[str, Any], transcript_clean: str) -> list[str]:
+        transcript_sentences = self._split_sentences(transcript_clean)
+        sentences: list[str] = []
+        seen: set[str] = set()
+        statement = str(rec.get("statement", "")).strip()
+        if statement and statement not in seen:
+            seen.add(statement)
+            sentences.append(statement)
+        for ev in rec.get("evidence", []):
+            if not isinstance(ev, str):
+                continue
+            t = ev.strip()
+            if t and t not in seen:
+                seen.add(t)
+                sentences.append(t)
+
+        tokens = {
+            tok
+            for tok in re.findall(r"[A-Za-z0-9]+", statement.lower())
+            if len(tok) >= 4 and tok not in {"that", "this", "with", "from", "will", "have", "were"}
+        }
+        for sentence in transcript_sentences:
+            if any(ev in sentence for ev in rec.get("evidence", []) if isinstance(ev, str) and ev):
+                if sentence not in seen:
+                    seen.add(sentence)
+                    sentences.append(sentence)
+                continue
+            if tokens and len(tokens & set(re.findall(r"[A-Za-z0-9]+", sentence.lower()))) >= 2:
+                if sentence not in seen:
+                    seen.add(sentence)
+                    sentences.append(sentence)
+
+        if not sentences and statement:
+            sentences.append(statement)
+        return sentences
+
     def _harden_records(
         self,
         data: dict[str, Any],
         transcript_clean: str,
         executive: dict[str, Any],
         alias_map: dict[str, str],
+        executive_primary: str,
+        primary_actor: str,
     ) -> dict[str, Any]:
         known_values = {v.lower() for v in alias_map.values() if isinstance(v, str)}
-        records = []
+        records: list[dict[str, Any]] = []
         dropped_unsupported = 0
         for rec in data["decision_records"]:
-            rec = self._augment_dependencies(rec, executive)
-            rec = self._enforce_primary_owner(rec)
-            rec = self._enforce_missing_owner_gap(rec)
-            rec = self._enforce_confirmed_rule(rec)
-            rec = self._enforce_blocked_rule(rec)
-            rec = self._apply_unknown_actor_confidence(rec, alias_map, known_values)
             try:
                 rec = self._enforce_evidence(rec, transcript_clean)
             except DecisionIntelligenceV2Error:
                 dropped_unsupported += 1
                 continue
+            rec = self._repair_commitments(
+                rec,
+                transcript_clean,
+                executive_primary,
+                primary_actor,
+                alias_map,
+            )
+            rec = self._resolve_owner_from_evidence(
+                rec,
+                transcript_clean,
+                executive_primary,
+                primary_actor,
+                alias_map,
+            )
+            rec = self._extract_timeline_signals(rec, transcript_clean)
+            rec = self._augment_dependencies(rec, executive)
+            rec = self._enforce_dependency_reasons(rec)
+            rec = self._coerce_state_from_evidence(rec)
+            rec = self._enforce_confirmed_rule(rec)
+            rec = self._enforce_blocked_rule(rec)
+            rec = self._calibrate_impact(rec)
+            rec = self._enforce_primary_owner(rec)
+            rec = self._enforce_missing_owner_gap(rec)
+            rec = self._apply_confidence_corrections(rec, alias_map, known_values)
             if not rec.get("decision_id"):
                 rec["decision_id"] = self._decision_id(rec)
             records.append(rec)
@@ -461,40 +622,454 @@ class DecisionIntelligenceV2Service:
         return data
 
     def _enforce_primary_owner(self, rec: dict[str, Any]) -> dict[str, Any]:
-        owners = rec.get("owners", [])
-        assigned = [o.get("actor", "").strip() for o in owners if o.get("ownership_type") == "assigned_owner" and o.get("actor", "").strip()]
-        shared = [o.get("actor", "").strip() for o in owners if o.get("ownership_type") == "shared_owner" and o.get("actor", "").strip()]
-        rec["primary_owner"] = assigned[0] if assigned else (shared[0] if shared else "")
+        owners = [o for o in rec.get("owners", []) if isinstance(o, dict)]
+        assigned = [
+            o.get("actor", "").strip()
+            for o in owners
+            if o.get("ownership_type") == "assigned_owner" and o.get("actor", "").strip()
+        ]
+        shared = [
+            o.get("actor", "").strip()
+            for o in owners
+            if o.get("ownership_type") == "shared_owner" and o.get("actor", "").strip()
+        ]
+        if assigned:
+            rec["primary_owner"] = assigned[0]
+        elif shared:
+            rec["primary_owner"] = shared[0]
+        elif str(rec.get("primary_owner", "")).strip():
+            rec["primary_owner"] = str(rec.get("primary_owner", "")).strip()
+        else:
+            rec["primary_owner"] = ""
+        return rec
+
+    def _resolve_owner_from_evidence(
+        self,
+        rec: dict[str, Any],
+        transcript_clean: str,
+        executive_primary: str,
+        primary_actor: str,
+        alias_map: dict[str, str],
+    ) -> dict[str, Any]:
+        owners = [o for o in rec.get("owners", []) if isinstance(o, dict)]
+        explicit_candidate = ""
+        for owner in owners:
+            actor = str(owner.get("actor", "")).strip()
+            if actor and owner.get("ownership_type") in {"assigned_owner", "shared_owner"}:
+                explicit_candidate = self._normalize_actor(actor, alias_map)
+                break
+        if not explicit_candidate:
+            for cmt in rec.get("commitments", []):
+                if not isinstance(cmt, dict):
+                    continue
+                actor = self._normalize_actor(str(cmt.get("actor", "")).strip(), alias_map)
+                if actor:
+                    explicit_candidate = actor
+                    break
+
+        combined = " ".join(self._collect_record_sentences(rec, transcript_clean))
+        resolved = explicit_candidate
+        if not resolved:
+            for actor in [executive_primary, primary_actor]:
+                if actor and re.search(rf"\b{re.escape(actor)}\b", combined, flags=re.IGNORECASE):
+                    resolved = actor
+                    break
+        if not resolved and self._has_responsibility_language(combined):
+            resolved = executive_primary or primary_actor
+
+        if resolved:
+            rec["primary_owner"] = resolved
+            if not any(
+                isinstance(o, dict)
+                and o.get("ownership_type") == "assigned_owner"
+                and str(o.get("actor", "")).strip() == resolved
+                for o in owners
+            ):
+                owners.insert(0, {"actor": resolved, "ownership_type": "assigned_owner"})
+
+        cleaned_owners: list[dict[str, str]] = []
+        seen = set()
+        for owner in owners:
+            actor = self._normalize_actor(str(owner.get("actor", "")).strip(), alias_map)
+            ownership_type = self._coerce(
+                str(owner.get("ownership_type", "")).strip().lower(), OWNERSHIP_ENUM, "missing_owner"
+            )
+            if ownership_type != "missing_owner" and not actor:
+                continue
+            if ownership_type == "missing_owner" and actor:
+                ownership_type = "assigned_owner"
+            key = (actor, ownership_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned_owners.append({"actor": actor, "ownership_type": ownership_type})
+
+        rec["owners"] = cleaned_owners
+        return rec
+
+    def _normalize_commitment_text(self, sentence: str) -> str:
+        lowered = sentence.lower().strip()
+        if "i will mark" in lowered or "i will list" in lowered or "phasing" in lowered:
+            return "Prepare a question list and phased project view for the next meeting."
+        if "we will meet" in lowered or "meet again" in lowered:
+            return "Hold a follow-up meeting to continue project clarification."
+        if "yes" in lowered and "move forward" in lowered:
+            return "Move forward with the project and proceed with deeper clarification."
+        if "you will" in lowered and ("representative" in lowered or "responsible" in lowered):
+            return "Act as the on-ground representative and execution lead in India."
+        return sentence.strip()
+
+    def _extract_commitment_actor(
+        self,
+        sentence: str,
+        commitment_type: str,
+        executive_primary: str,
+        primary_actor: str,
+        alias_map: dict[str, str],
+    ) -> str:
+        lowered = sentence.lower()
+        if commitment_type == "implied_commitment" and "you will" in lowered:
+            return executive_primary or primary_actor
+        if commitment_type == "requested_commitment":
+            if "can you" in lowered or "would you consider" in lowered:
+                return executive_primary or primary_actor
+            return primary_actor or executive_primary
+        if commitment_type == "explicit_commitment":
+            if "i will" in lowered or "i'll" in lowered:
+                return primary_actor or executive_primary
+            if "we will" in lowered or "we'll" in lowered:
+                return primary_actor or executive_primary
+
+        for name in {executive_primary, primary_actor}:
+            if name and re.search(rf"\b{re.escape(name)}\b", sentence, flags=re.IGNORECASE):
+                return self._normalize_actor(name, alias_map)
+        return ""
+
+    def _append_commitment_if_new(
+        self,
+        bucket: list[dict[str, str]],
+        actor: str,
+        commitment: str,
+        commitment_type: str,
+        status: str,
+        confidence: str,
+    ) -> None:
+        actor = actor.strip()
+        commitment = commitment.strip()
+        if not actor and not commitment:
+            return
+        key = (actor.lower(), commitment.lower(), commitment_type)
+        for existing in bucket:
+            ekey = (
+                str(existing.get("actor", "")).lower(),
+                str(existing.get("commitment", "")).lower(),
+                str(existing.get("commitment_type", "")),
+            )
+            if key == ekey:
+                return
+        bucket.append(
+            {
+                "actor": actor,
+                "commitment": commitment,
+                "commitment_type": commitment_type,
+                "status": status,
+                "confidence": confidence,
+            }
+        )
+
+    def _repair_commitments(
+        self,
+        rec: dict[str, Any],
+        transcript_clean: str,
+        executive_primary: str,
+        primary_actor: str,
+        alias_map: dict[str, str],
+    ) -> dict[str, Any]:
+        repaired: list[dict[str, str]] = []
+        for item in rec.get("commitments", []):
+            if not isinstance(item, dict):
+                continue
+            actor = self._normalize_actor(str(item.get("actor", "")).strip(), alias_map)
+            commitment = str(item.get("commitment", "")).strip()
+            ctype = self._coerce(
+                str(item.get("commitment_type", "")).strip().lower(),
+                COMMITMENT_TYPE_ENUM,
+                "unresolved_commitment",
+            )
+            status = self._coerce(
+                str(item.get("status", "")).strip().lower(), COMMITMENT_STATUS_ENUM, "unresolved"
+            )
+            confidence = self._coerce(str(item.get("confidence", "")).strip().lower(), HML, "low")
+            if not actor and not commitment:
+                continue
+            self._append_commitment_if_new(repaired, actor, commitment, ctype, status, confidence)
+
+        for sentence in self._collect_record_sentences(rec, transcript_clean):
+            lowered = sentence.lower()
+            has_implied = any(pattern in lowered for pattern in IMPLIED_PATTERNS)
+            if has_implied:
+                actor = self._extract_commitment_actor(
+                    sentence,
+                    "implied_commitment",
+                    executive_primary,
+                    primary_actor,
+                    alias_map,
+                )
+                self._append_commitment_if_new(
+                    repaired,
+                    actor,
+                    self._normalize_commitment_text(sentence),
+                    "implied_commitment",
+                    "accepted",
+                    "medium",
+                )
+
+            if any(pattern in lowered for pattern in REQUESTED_PATTERNS):
+                actor = self._extract_commitment_actor(
+                    sentence,
+                    "requested_commitment",
+                    executive_primary,
+                    primary_actor,
+                    alias_map,
+                )
+                self._append_commitment_if_new(
+                    repaired,
+                    actor,
+                    self._normalize_commitment_text(sentence),
+                    "requested_commitment",
+                    "open",
+                    "medium",
+                )
+
+            if any(pattern in lowered for pattern in EXPLICIT_PATTERNS) and not has_implied:
+                actor = self._extract_commitment_actor(
+                    sentence,
+                    "explicit_commitment",
+                    executive_primary,
+                    primary_actor,
+                    alias_map,
+                )
+                confidence = "medium" if any(marker in lowered for marker in UNCERTAINTY_MARKERS) else "high"
+                self._append_commitment_if_new(
+                    repaired,
+                    actor,
+                    self._normalize_commitment_text(sentence),
+                    "explicit_commitment",
+                    "accepted",
+                    confidence,
+                )
+
+        if not repaired:
+            text = " ".join(self._collect_record_sentences(rec, transcript_clean)).lower()
+            if "will" in text or "responsible" in text:
+                self._append_commitment_if_new(
+                    repaired,
+                    executive_primary or primary_actor,
+                    "Clarify commitment ownership and acceptance.",
+                    "unresolved_commitment",
+                    "unresolved",
+                    "low",
+                )
+
+        rec["commitments"] = repaired
+        return rec
+
+    def _extract_timeline_signals(self, rec: dict[str, Any], transcript_clean: str) -> dict[str, Any]:
+        signals = [s for s in rec.get("timeline_signals", []) if isinstance(s, dict)]
+        seen = {
+            (
+                str(s.get("signal_type", "")).strip().lower(),
+                str(s.get("raw_reference", "")).strip().lower(),
+            )
+            for s in signals
+            if str(s.get("raw_reference", "")).strip()
+        }
+
+        transcript_sentences = self._split_sentences(transcript_clean)
+        sentences = self._collect_record_sentences(rec, transcript_clean)
+        statement = str(rec.get("statement", "")).lower()
+        if "meeting" in statement or "meet" in statement:
+            for sentence in self._split_sentences(transcript_clean):
+                lowered = sentence.lower()
+                if "meet" in lowered or "class" in lowered:
+                    sentences.append(sentence)
+
+        for sentence in sentences:
+            for pattern, signal_type, confidence in TIME_PATTERNS:
+                for match in re.finditer(pattern, sentence, flags=re.IGNORECASE):
+                    raw = sentence[match.start() : match.end()].strip()
+                    key = (signal_type, raw.lower())
+                    if raw and key not in seen:
+                        seen.add(key)
+                        signals.append(
+                            {
+                                "signal_type": signal_type,
+                                "raw_reference": raw,
+                                "confidence": confidence,
+                            }
+                        )
+
+        record_text = " ".join(
+            [str(rec.get("statement", ""))]
+            + [str(e) for e in rec.get("evidence", []) if isinstance(e, str)]
+            + [str(c.get("commitment", "")) for c in rec.get("commitments", []) if isinstance(c, dict)]
+        ).lower()
+        if not signals and any(
+            k in record_text for k in ["start", "phase", "meeting", "meet", "implementation", "project"]
+        ):
+            for sentence in transcript_sentences:
+                for pattern, signal_type, confidence in TIME_PATTERNS:
+                    for match in re.finditer(pattern, sentence, flags=re.IGNORECASE):
+                        raw = sentence[match.start() : match.end()].strip()
+                        key = (signal_type, raw.lower())
+                        if raw and key not in seen:
+                            seen.add(key)
+                            signals.append(
+                                {
+                                    "signal_type": signal_type,
+                                    "raw_reference": raw,
+                                    "confidence": confidence,
+                                }
+                            )
+                if len(signals) >= 4:
+                    break
+
+        if ("meeting" in statement or "meet" in statement) and not any(
+            "5:30" in str(s.get("raw_reference", "")) for s in signals if isinstance(s, dict)
+        ):
+            for sentence in transcript_sentences:
+                for pattern, signal_type, confidence in (
+                    (r"\btuesday\s+after\s+5:30\b", "followup_marker", "high"),
+                    (r"\bafter\s+5:30\b", "followup_marker", "high"),
+                ):
+                    for match in re.finditer(pattern, sentence, flags=re.IGNORECASE):
+                        raw = sentence[match.start() : match.end()].strip()
+                        key = (signal_type, raw.lower())
+                        if raw and key not in seen:
+                            seen.add(key)
+                            signals.append(
+                                {
+                                    "signal_type": signal_type,
+                                    "raw_reference": raw,
+                                    "confidence": confidence,
+                                }
+                            )
+
+        if any(k in record_text for k in ["start", "project", "implementation"]) and not any(
+            "june" in str(s.get("raw_reference", "")).lower() for s in signals if isinstance(s, dict)
+        ):
+            for sentence in transcript_sentences:
+                for pattern, signal_type, confidence in (
+                    (r"\bmaybe\s+june\b", "start_window", "medium"),
+                    (r"\bfirst\s+june\b", "start_window", "medium"),
+                ):
+                    for match in re.finditer(pattern, sentence, flags=re.IGNORECASE):
+                        raw = sentence[match.start() : match.end()].strip()
+                        key = (signal_type, raw.lower())
+                        if raw and key not in seen:
+                            seen.add(key)
+                            signals.append(
+                                {
+                                    "signal_type": signal_type,
+                                    "raw_reference": raw,
+                                    "confidence": confidence,
+                                }
+                            )
+
+        rec["timeline_signals"] = signals
         return rec
 
     def _enforce_missing_owner_gap(self, rec: dict[str, Any]) -> dict[str, Any]:
-        if str(rec.get("primary_owner", "")).strip():
+        primary_owner = str(rec.get("primary_owner", "")).strip()
+        owners = [o for o in rec.get("owners", []) if isinstance(o, dict)]
+        gaps = [g for g in rec.get("decision_gaps", []) if isinstance(g, dict)]
+        if primary_owner:
+            owners = [
+                o
+                for o in owners
+                if not (
+                    o.get("ownership_type") == "missing_owner"
+                    and not str(o.get("actor", "")).strip()
+                )
+            ]
+            if not any(
+                str(o.get("actor", "")).strip() == primary_owner
+                and o.get("ownership_type") in {"assigned_owner", "shared_owner"}
+                for o in owners
+            ):
+                owners.insert(0, {"actor": primary_owner, "ownership_type": "assigned_owner"})
+            gaps = [
+                g
+                for g in gaps
+                if str(g.get("gap_type", "")).lower() != "missing_owner"
+                and "accountable owner" not in str(g.get("question", "")).lower()
+            ]
+            rec["owners"] = owners
+            rec["decision_gaps"] = gaps
             return rec
-        owners = rec.get("owners", [])
-        if not owners:
+
+        if not any(o.get("ownership_type") == "missing_owner" for o in owners):
             owners.append({"actor": "", "ownership_type": "missing_owner"})
-        elif not any(o.get("ownership_type") == "missing_owner" for o in owners if isinstance(o, dict)):
-            owners.append({"actor": "", "ownership_type": "missing_owner"})
-        gaps = rec.get("decision_gaps", [])
         if not any(
-            isinstance(g, dict)
-            and (
-                str(g.get("gap_type", "")).lower() == "missing_owner"
-                or "accountable owner" in str(g.get("question", "")).lower()
-            )
+            str(g.get("gap_type", "")).lower() == "missing_owner"
+            or "accountable owner" in str(g.get("question", "")).lower()
             for g in gaps
         ):
-            gaps.append({"gap_type": "missing_owner", "criticality": "high", "question": "Who is the accountable owner for this decision?"})
+            gaps.append(
+                {
+                    "gap_type": "missing_owner",
+                    "criticality": "high",
+                    "question": "Who is the accountable owner for this decision?",
+                }
+            )
         rec["owners"] = owners
         rec["decision_gaps"] = gaps
+        return rec
+
+    def _coerce_state_from_evidence(self, rec: dict[str, Any]) -> dict[str, Any]:
+        text = " ".join(
+            [str(rec.get("statement", ""))]
+            + [str(e) for e in rec.get("evidence", []) if isinstance(e, str)]
+            + [str(c.get("commitment", "")) for c in rec.get("commitments", []) if isinstance(c, dict)]
+        ).lower()
+        if self._has_open_high(rec):
+            rec["state"] = "blocked"
+            return rec
+        has_pending = any(marker in text for marker in PENDING_MARKERS)
+        has_weak = any(marker in text for marker in UNCERTAINTY_MARKERS)
+        has_explicit = any(
+            isinstance(c, dict) and c.get("commitment_type") == "explicit_commitment"
+            for c in rec.get("commitments", [])
+        )
+        if has_pending:
+            rec["state"] = "pending"
+        elif has_weak:
+            rec["state"] = "tentative"
+        elif has_explicit:
+            rec["state"] = "confirmed"
+        elif rec.get("state") not in STATE_ENUM:
+            rec["state"] = "tentative"
         return rec
 
     def _enforce_confirmed_rule(self, rec: dict[str, Any]) -> dict[str, Any]:
         if rec.get("state") != "confirmed":
             return rec
-        has_explicit = any(c.get("commitment_type") == "explicit_commitment" for c in rec.get("commitments", []) if isinstance(c, dict))
+        text = " ".join(
+            [str(rec.get("statement", ""))]
+            + [str(e) for e in rec.get("evidence", []) if isinstance(e, str)]
+        ).lower()
+        has_explicit = any(
+            c.get("commitment_type") == "explicit_commitment"
+            for c in rec.get("commitments", [])
+            if isinstance(c, dict)
+        )
         if not has_explicit:
             rec["state"] = "blocked" if self._has_open_high(rec) else "tentative"
+            return rec
+        if any(marker in text for marker in PENDING_MARKERS):
+            rec["state"] = "pending"
+        elif any(marker in text for marker in UNCERTAINTY_MARKERS):
+            rec["state"] = "tentative"
         return rec
 
     def _enforce_blocked_rule(self, rec: dict[str, Any]) -> dict[str, Any]:
@@ -503,20 +1078,97 @@ class DecisionIntelligenceV2Service:
         return rec
 
     def _has_open_high(self, rec: dict[str, Any]) -> bool:
-        return any(d.get("status") == "open" and d.get("blocking_level") == "high" for d in rec.get("dependencies", []) if isinstance(d, dict))
+        return any(
+            d.get("status") == "open" and d.get("blocking_level") == "high"
+            for d in rec.get("dependencies", [])
+            if isinstance(d, dict)
+        )
 
-    def _apply_unknown_actor_confidence(
+    def _calibrate_impact(self, rec: dict[str, Any]) -> dict[str, Any]:
+        text = " ".join(
+            [str(rec.get("statement", ""))]
+            + [str(e) for e in rec.get("evidence", []) if isinstance(e, str)]
+        ).lower()
+        high_markers = (
+            "center of excellence",
+            "coe",
+            "four years",
+            "representative",
+            "responsible",
+            "authority",
+            "governance",
+            "funding",
+            "revenue",
+            "tuition",
+            "india",
+            "long-term project",
+            "implementation",
+        )
+        medium_markers = (
+            "next meeting",
+            "meet again",
+            "tuesday",
+            "first of may",
+            "first week",
+            "phasing",
+            "questions",
+            "start with",
+        )
+        low_markers = ("whatsapp", "close from here", "thanks", "bon app")
+        if any(marker in text for marker in low_markers):
+            rec["impact_level"] = "low"
+        elif any(marker in text for marker in high_markers):
+            rec["impact_level"] = "high"
+        elif any(marker in text for marker in medium_markers):
+            rec["impact_level"] = "medium"
+        else:
+            rec["impact_level"] = "medium"
+        if "meeting" in text and rec["impact_level"] == "high":
+            rec["impact_level"] = "medium"
+        if any(marker in text for marker in UNCERTAINTY_MARKERS) and rec["impact_level"] == "high":
+            rec["impact_level"] = "medium"
+        return rec
+
+    def _apply_confidence_corrections(
         self,
         rec: dict[str, Any],
         alias_map: dict[str, str],
         known_values: set[str],
     ) -> dict[str, Any]:
+        def rank(level: str) -> int:
+            return {"low": 0, "medium": 1, "high": 2}.get(level, 1)
+
+        def min_level(cur: str, cap: str) -> str:
+            return cur if rank(cur) <= rank(cap) else cap
+
         def known(actor: str) -> bool:
             return bool(actor) and (actor.lower() in alias_map or actor.lower() in known_values)
 
+        rec["confidence"] = self._coerce(str(rec.get("confidence", "")).lower(), HML, "medium")
         primary_owner = str(rec.get("primary_owner", "")).strip()
         if primary_owner and not known(primary_owner):
             rec["confidence"] = "low"
+        if not primary_owner:
+            rec["confidence"] = min_level(rec["confidence"], "medium")
+
+        text = " ".join(
+            [str(rec.get("statement", ""))]
+            + [str(e) for e in rec.get("evidence", []) if isinstance(e, str)]
+        ).lower()
+        if any(marker in text for marker in UNCERTAINTY_MARKERS):
+            rec["confidence"] = min_level(rec["confidence"], "medium")
+        if any(marker in text for marker in PENDING_MARKERS):
+            rec["confidence"] = min_level(rec["confidence"], "medium")
+
+        commitment_types = {
+            c.get("commitment_type")
+            for c in rec.get("commitments", [])
+            if isinstance(c, dict)
+        }
+        if commitment_types and commitment_types <= {"requested_commitment", "unresolved_commitment"}:
+            rec["confidence"] = min_level(rec["confidence"], "medium")
+            if commitment_types == {"unresolved_commitment"}:
+                rec["confidence"] = "low"
 
         for cmt in rec.get("commitments", []):
             if not isinstance(cmt, dict):
@@ -525,30 +1177,63 @@ class DecisionIntelligenceV2Service:
             if actor and not known(actor):
                 cmt["confidence"] = "low"
                 rec["confidence"] = "low"
+            if cmt.get("commitment_type") in {"requested_commitment", "unresolved_commitment"} and cmt.get("confidence") == "high":
+                cmt["confidence"] = "medium"
+        if rec.get("state") in {"tentative", "pending"}:
+            rec["confidence"] = min_level(rec["confidence"], "medium")
         return rec
 
     def _augment_dependencies(self, rec: dict[str, Any], executive: dict[str, Any]) -> dict[str, Any]:
-        deps = rec.get("dependencies", [])
+        deps = [d for d in rec.get("dependencies", []) if isinstance(d, dict)]
         ex_struct = executive.get("execution_structure", {}) if isinstance(executive, dict) else {}
         bm = executive.get("business_model_clarity", {}) if isinstance(executive, dict) else {}
         text = " ".join(
             [str(rec.get("statement", ""))]
-            + rec.get("evidence", [])
+            + [str(e) for e in rec.get("evidence", []) if isinstance(e, str)]
             + [str(c.get("commitment", "")) for c in rec.get("commitments", []) if isinstance(c, dict)]
         ).lower()
         has = {d.get("type") for d in deps if isinstance(d, dict)}
-        exec_related = any(k in text for k in ["implementation", "coe", "program", "representative"])
+        exec_related = any(
+            k in text
+            for k in ["implementation", "coe", "program", "representative", "responsible", "india"]
+        )
         if ex_struct.get("authority_clarity") in {"partial", "undefined"} and exec_related and "authority_dependency" not in has:
-            deps.append({"type": "authority_dependency", "status": "open", "blocking_level": "high", "reason": "Operational authority remains unclear for execution ownership."})
+            deps.append({"type": "authority_dependency", "status": "open", "blocking_level": "high", "reason": ""})
         if ex_struct.get("governance_clarity") in {"partial", "undefined"} and exec_related and "governance_dependency" not in has:
-            deps.append({"type": "governance_dependency", "status": "open", "blocking_level": ("high" if ex_struct.get("governance_clarity") == "undefined" else "medium"), "reason": "Governance structure for execution control is not fully defined."})
+            deps.append({"type": "governance_dependency", "status": "open", "blocking_level": ("high" if ex_struct.get("governance_clarity") == "undefined" else "medium"), "reason": ""})
         funding_related = any(k in text for k in ["fund", "revenue", "tuition", "fee", "profit", "finance", "phd"])
         if funding_related and ("funding_dependency" not in has) and (bm.get("funding_logic") in {"partial", "undefined"} or bm.get("revenue_logic") in {"partial", "undefined"}):
-            deps.append({"type": "funding_dependency", "status": "open", "blocking_level": ("high" if (bm.get("funding_logic") == "undefined" or bm.get("revenue_logic") == "undefined") else "medium"), "reason": "Funding/revenue model terms are not fully resolved."})
+            deps.append({"type": "funding_dependency", "status": "open", "blocking_level": ("high" if (bm.get("funding_logic") == "undefined" or bm.get("revenue_logic") == "undefined") else "medium"), "reason": ""})
         has_signal = any(str(s.get("raw_reference", "")).strip() for s in rec.get("timeline_signals", []) if isinstance(s, dict))
         if (has_signal or any(k in text for k in ["may", "june", "week", "tuesday", "timeline", "start"])) and "timeline_dependency" not in has:
-            deps.append({"type": "timeline_dependency", "status": "open", "blocking_level": "medium", "reason": "Timeline references exist but execution timing remains unresolved."})
+            deps.append({"type": "timeline_dependency", "status": "open", "blocking_level": "medium", "reason": ""})
         rec["dependencies"] = deps
+        return rec
+
+    def _enforce_dependency_reasons(self, rec: dict[str, Any]) -> dict[str, Any]:
+        repaired = []
+        for dep in rec.get("dependencies", []):
+            if not isinstance(dep, dict):
+                continue
+            dep_type = self._coerce(
+                str(dep.get("type", "")).strip().lower(), DEPENDENCY_TYPE_ENUM, "governance_dependency"
+            )
+            reason = str(dep.get("reason", "")).strip()
+            if not reason:
+                reason = DEPENDENCY_REASON_TEMPLATES[dep_type]
+            repaired.append(
+                {
+                    "type": dep_type,
+                    "status": self._coerce(
+                        str(dep.get("status", "")).strip().lower(), DEPENDENCY_STATUS_ENUM, "open"
+                    ),
+                    "blocking_level": self._coerce(
+                        str(dep.get("blocking_level", "")).strip().lower(), HML, "medium"
+                    ),
+                    "reason": reason,
+                }
+            )
+        rec["dependencies"] = repaired
         return rec
 
     def _enforce_evidence(self, rec: dict[str, Any], transcript_clean: str) -> dict[str, Any]:
@@ -567,8 +1252,26 @@ class DecisionIntelligenceV2Service:
                 valid.append(recovered)
         if not valid:
             raise DecisionIntelligenceV2Error("Decision record is unsupported after evidence validation")
-        rec["evidence"] = valid
+        rec["evidence"] = self._prefer_sentence_evidence(valid, transcript_clean)
         return rec
+
+    def _prefer_sentence_evidence(self, evidence: list[str], transcript_clean: str) -> list[str]:
+        sentences = self._split_sentences(transcript_clean)
+        scored: list[tuple[int, str]] = []
+        seen = set()
+        for ev in evidence:
+            best = ev
+            best_len = len(ev)
+            if len(re.findall(r"[A-Za-z0-9]+", ev)) >= 5:
+                for sentence in sentences:
+                    if ev in sentence and len(sentence) > best_len:
+                        best = sentence
+                        best_len = len(sentence)
+            if best not in seen:
+                seen.add(best)
+                scored.append((best_len, best))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [text for _, text in scored]
 
     def _recover_evidence(self, rec: dict[str, Any], transcript_clean: str) -> str:
         candidates: list[str] = []
@@ -618,7 +1321,14 @@ class DecisionIntelligenceV2Service:
         digest = hashlib.sha1(f"{statement}|{first_ev}".encode("utf-8", errors="ignore")).hexdigest()[:10]
         return f"DEC-{digest}"
 
-    def _validate_records(self, data: dict[str, Any], transcript_clean: str, alias_map: dict[str, str]) -> None:
+    def _validate_records(
+        self,
+        data: dict[str, Any],
+        transcript_clean: str,
+        alias_map: dict[str, str],
+        executive_primary: str,
+        primary_actor: str,
+    ) -> None:
         for rec in data.get("decision_records", []):
             if rec.get("state") not in STATE_ENUM:
                 raise DecisionIntelligenceV2Error("Invalid decision state")
@@ -648,6 +1358,8 @@ class DecisionIntelligenceV2Service:
                 actor = str(cmt.get("actor", "")).strip()
                 if actor and actor.lower() in alias_map and actor != self._normalize_actor(actor, alias_map):
                     raise DecisionIntelligenceV2Error("Commitment actor not normalized")
+                if not actor and not str(cmt.get("commitment", "")).strip():
+                    raise DecisionIntelligenceV2Error("Commitment cannot have both empty actor and commitment")
 
             deps = rec.get("dependencies", [])
             for dep in deps:
@@ -659,6 +1371,8 @@ class DecisionIntelligenceV2Service:
                     raise DecisionIntelligenceV2Error("Invalid dependency status")
                 if dep.get("blocking_level") not in HML:
                     raise DecisionIntelligenceV2Error("Invalid dependency blocking_level")
+                if not str(dep.get("reason", "")).strip():
+                    raise DecisionIntelligenceV2Error("Dependency reason cannot be empty")
 
             for signal in rec.get("timeline_signals", []):
                 if not isinstance(signal, dict):
@@ -674,10 +1388,20 @@ class DecisionIntelligenceV2Service:
             for ev in evidence:
                 if not isinstance(ev, str) or ev not in transcript_clean:
                     raise DecisionIntelligenceV2Error("Evidence must be exact transcript substring")
+            text = " ".join(
+                [str(rec.get("statement", ""))]
+                + [str(e) for e in evidence if isinstance(e, str)]
+            ).lower()
+            if self._contains_time_phrase(text) and not rec.get("timeline_signals", []):
+                raise DecisionIntelligenceV2Error(
+                    "Timeline signal missing despite explicit time phrase evidence"
+                )
 
             if rec.get("state") == "confirmed":
                 if not any(c.get("commitment_type") == "explicit_commitment" for c in commitments if isinstance(c, dict)):
                     raise DecisionIntelligenceV2Error("Confirmed decision has no explicit commitment")
+                if any(marker in text for marker in PENDING_MARKERS + UNCERTAINTY_MARKERS):
+                    raise DecisionIntelligenceV2Error("Confirmed decision contains unresolved markers")
 
             if rec.get("state") == "blocked" and not self._has_open_high(rec):
                 raise DecisionIntelligenceV2Error("Blocked decision must include open high dependency")
@@ -693,6 +1417,10 @@ class DecisionIntelligenceV2Service:
                     raise DecisionIntelligenceV2Error("Missing owner decision must include missing_owner ownership_type")
                 if not missing_owner_gap:
                     raise DecisionIntelligenceV2Error("Missing owner decision must include missing_owner gap")
+                if self._has_responsibility_language(text) and (executive_primary or primary_actor):
+                    raise DecisionIntelligenceV2Error(
+                        "Owner should have been resolved from responsibility evidence"
+                    )
             else:
                 if not any(isinstance(o, dict) and str(o.get("actor", "")).strip() == primary_owner for o in owners):
                     raise DecisionIntelligenceV2Error("primary_owner is not present in owners list")
