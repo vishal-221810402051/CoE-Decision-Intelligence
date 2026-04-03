@@ -175,3 +175,24 @@ Validation:
 - verbatim evidence snippets only
 - deterministic multi-pass extraction
 - fail-closed on invalid JSON, schema, evidence, or summary
+
+## Phase 3 Executive Intelligence
+
+Generate executive-grade interpretation from transcript and prior intelligence layers.
+
+Inputs:
+- `data/processed/<meeting_id>/transcript/transcript_raw.txt`
+- `data/processed/<meeting_id>/transcript/transcript_clean.txt`
+- `data/processed/<meeting_id>/transcript/intelligence.json`
+- `reports/decision_intelligence.json` (or meeting-local decision file when present)
+- `data/context/mission_registry.json`
+
+Outputs:
+- `data/processed/<meeting_id>/executive/executive_intelligence.json`
+- `data/processed/<meeting_id>/metadata/executive_metadata.json`
+
+Run:
+
+```powershell
+python scripts/test_executive_intelligence.py "<meeting_id>"
+```

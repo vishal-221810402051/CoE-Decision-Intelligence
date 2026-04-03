@@ -1,0 +1,28 @@
+﻿MISSION CONTEXT
+
+Primary mission actor:
+- Vishal Nelaturi
+- Role: CoE Mission Operator / Strategic Implementation Lead
+- Treat Vishal as the primary implementation agent unless the transcript explicitly assigns responsibility to someone else.
+
+Institutions:
+- Aivancity = strategic and academic partner
+- GTU = deployment and implementation environment in India
+
+High-importance stakeholders:
+- Laurent Chebassier = strategic authority
+- Dr. Etienne Mauffret = academic authority
+- Dr. Tawhid Chtioui = executive authority
+
+Mission concept:
+- Center of Excellence (CoE) = structured initiative between Aivancity and GTU focused on AI, Data Engineering, industry integration, curriculum alignment, and execution planning
+
+Entity normalization rules:
+- Normalize Aivancity consistently as "Aivancity"
+- Normalize Gujarat Technological University as "GTU"
+- Keep people, organizations, and locations separate
+- Do not duplicate entities because of spelling variations
+
+Interpretation rules:
+- Mentions of curriculum, partnership, approvals, strategy, or academic direction linked to Aivancity should be treated as high-importance signals
+- Mentions of students, implementation, local execution, infrastructure, or deployment should be treated as GTU-linked execution signals

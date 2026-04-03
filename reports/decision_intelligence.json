@@ -1,0 +1,111 @@
+{
+  "decisions_structured": [
+    {
+      "decision": "Start the AI clinic project with a focus on developing relationships with small-sized companies.",
+      "confidence": "high",
+      "evidence": "The idea is that we will start here."
+    },
+    {
+      "decision": "Finance a PhD for Vishal.",
+      "confidence": "high",
+      "evidence": "Tawid said, okay, we can finance a PhD as well."
+    },
+    {
+      "decision": "Vishal will be the representative for the project in India.",
+      "confidence": "high",
+      "evidence": "We believe that you will be our best representative to make things happen."
+    },
+    {
+      "decision": "Establish a Center of Excellence (CoE) that will exist for four years.",
+      "confidence": "high",
+      "evidence": "It can be the idea is that whatever we will do first, I mean, potentially the center of excellence will exist for four years."
+    },
+    {
+      "decision": "Develop programs for both executives and students at the CoE.",
+      "confidence": "high",
+      "evidence": "It means that we will have programs for executives. We will have programs for students."
+    },
+    {
+      "decision": "Schedule a follow-up meeting to discuss project details.",
+      "confidence": "high",
+      "evidence": "Tell me when you want that we meet again."
+    }
+  ],
+  "roles": [
+    {
+      "role": "Project Representative",
+      "assigned_to": "Vishal",
+      "responsibilities": [
+        "Act as the head of the project in India",
+        "Define project phases and approaches",
+        "Communicate with stakeholders"
+      ],
+      "authority_level": "high",
+      "evidence": "You will be the one who will be responsible for making this happen."
+    }
+  ],
+  "power_map": {
+    "decision_makers": [
+      "Tawid",
+      "Etienne",
+      "Laurent"
+    ],
+    "executors": [
+      "Vishal"
+    ],
+    "advisors": [
+      "Amit"
+    ],
+    "unknowns": []
+  },
+  "strategy": {
+    "objective": "Establish a Center of Excellence in India to enhance AI education and partnerships.",
+    "business_model": "Self-funded through program fees and partnerships.",
+    "revenue_logic": "To be defined based on tuition fees and revenue sharing.",
+    "success_condition": "Successful establishment and operation of the CoE with profitable programs."
+  },
+  "timeline_structured": {
+    "start_date": "2024-05-01",
+    "confidence": "low",
+    "notes": "Tentative start date for activities in Gujarat."
+  },
+  "execution_plan": [
+    {
+      "task": "Create a phasing of the project and list questions.",
+      "owner": "Vishal",
+      "priority": "high"
+    },
+    {
+      "task": "Define the revenue-sharing model for the CoE.",
+      "owner": "Tawid",
+      "priority": "high"
+    },
+    {
+      "task": "Schedule follow-up meetings to clarify project details.",
+      "owner": "Laurent",
+      "priority": "medium"
+    }
+  ],
+  "critical_warnings": [
+    {
+      "risk": "Unresolved ownership for CoE execution can delay execution and weaken accountability.",
+      "severity": "high",
+      "reason": "Ownership detail for CoE execution is not clearly specified."
+    },
+    {
+      "risk": "Unresolved revenue logic can delay execution and weaken accountability.",
+      "severity": "high",
+      "reason": "Revenue logic is undefined."
+    },
+    {
+      "risk": "Unresolved funding terms for financial support model can delay execution.",
+      "severity": "high",
+      "reason": "Funding terms for financing a PhD are not finalized."
+    },
+    {
+      "risk": "Unresolved confirmed start date for execution timeline can delay execution.",
+      "severity": "medium",
+      "reason": "Execution timeline is unclear."
+    }
+  ]
+}

@@ -34,6 +34,13 @@ class Config:
     TRANSCRIPTION_METADATA_FILE_NAME: str = "transcription.json"
     TRANSCRIPTION_MODEL: str = "gpt-4o-mini-transcribe"
 
+    EXECUTIVE_MODEL: str = "gpt-4.1-mini"
+    EXECUTIVE_OUTPUT_DIR: str = "executive"
+    EXECUTIVE_OUTPUT_FILE: str = "executive_intelligence.json"
+    EXECUTIVE_METADATA_FILE: str = "executive_metadata.json"
+    EXECUTIVE_PROMPT_VERSION: str = "phase03_v1"
+    MISSION_REGISTRY_PATH: str = "data/context/mission_registry.json"
+
 
 config = Config()
 
@@ -90,3 +97,10 @@ INTELLIGENCE_METADATA_FILE_NAME = "intelligence_metadata.json"
 PASS_A_MAX_RETRIES = 2
 PASS_B_MAX_RETRIES = 2
 API_BACKOFF_SECONDS = [2, 5]
+
+EXECUTIVE_MODEL = config.EXECUTIVE_MODEL
+EXECUTIVE_OUTPUT_DIR = config.EXECUTIVE_OUTPUT_DIR
+EXECUTIVE_OUTPUT_FILE = config.EXECUTIVE_OUTPUT_FILE
+EXECUTIVE_METADATA_FILE = config.EXECUTIVE_METADATA_FILE
+EXECUTIVE_PROMPT_VERSION = config.EXECUTIVE_PROMPT_VERSION
+MISSION_REGISTRY_PATH = config.MISSION_REGISTRY_PATH
