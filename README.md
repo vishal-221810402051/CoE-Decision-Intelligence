@@ -183,8 +183,8 @@ Generate executive-grade interpretation from transcript and prior intelligence l
 Inputs:
 - `data/processed/<meeting_id>/transcript/transcript_raw.txt`
 - `data/processed/<meeting_id>/transcript/transcript_clean.txt`
-- `data/processed/<meeting_id>/transcript/intelligence.json`
-- `reports/decision_intelligence.json` (or meeting-local decision file when present)
+- `data/processed/<meeting_id>/intelligence/intelligence.json` (canonical Phase 06 artifact)
+- `reports/decision_intelligence.json` (legacy optional input only)
 - `data/context/mission_registry.json`
 
 Outputs:
@@ -204,7 +204,7 @@ Build an operational decision ledger from transcript and intelligence artifacts.
 Inputs:
 - `data/processed/<meeting_id>/transcript/transcript_raw.txt`
 - `data/processed/<meeting_id>/transcript/transcript_clean.txt`
-- `data/processed/<meeting_id>/transcript/intelligence.json`
+- `data/processed/<meeting_id>/intelligence/intelligence.json` (canonical Phase 06 artifact)
 - `data/processed/<meeting_id>/executive/executive_intelligence.json`
 - `data/context/mission_registry.json`
 
@@ -217,3 +217,32 @@ Run:
 ```powershell
 python scripts/test_decision_intelligence.py "<meeting_id>"
 ```
+
+## Phase 09.3 Determinism and Regression
+
+Ensure repeated-run stability and detect drift before any UI/Android work.
+
+What this phase adds:
+- repeated-run determinism check (`N` runs on same meeting)
+- normalized snapshot generation for stable comparisons
+- strict critical-drift detection for operational fields
+- benchmark suite runner against golden normalized snapshots
+
+Run repeated-run check:
+
+```powershell
+python scripts/repeat_run_check.py "<meeting_id>"
+```
+
+Outputs:
+- `data/processed/<meeting_id>/regression/repeat_run_report.json`
+- `data/processed/<meeting_id>/regression/normalized/run_XX/*.normalized.json`
+
+Run benchmark suite:
+
+```powershell
+python scripts/run_regression_suite.py
+```
+
+Output:
+- `benchmarks/reports/latest_regression_report.json`

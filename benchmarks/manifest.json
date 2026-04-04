@@ -1,0 +1,11 @@
+{
+  "meetings": [
+    {
+      "meeting_id": "MTG-20260402-161107-0bcf93",
+      "category": "strategy-heavy",
+      "difficulty": "medium",
+      "enabled": true
+    }
+  ]
+}
+

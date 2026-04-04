@@ -4,8 +4,8 @@
 Generate executive-grade interpretation from:
 - transcript_raw.txt
 - transcript_clean.txt
-- intelligence.json
-- decision_intelligence.json
+- intelligence/intelligence.json (canonical Phase 06 artifact)
+- reports/decision_intelligence.json (legacy optional input only)
 - mission_registry.json
 
 ## Outputs

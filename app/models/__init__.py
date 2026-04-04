@@ -5,6 +5,13 @@ from app.models.document import DocumentIntakeResult
 from app.models.executive import ExecutiveIntelligenceResult, executive_schema_defaults
 from app.models.intelligence import IntelligenceExtractionResult
 from app.models.normalization import NormalizationResult
+from app.models.regression import (
+    ArtifactComparisonResult,
+    DriftItem,
+    MeetingRegressionResult,
+    RegressionSuiteReport,
+    RepeatRunReport,
+)
 
 __all__ = [
     "IntakeResult",
@@ -16,4 +23,9 @@ __all__ = [
     "IntelligenceExtractionResult",
     "decision_v2_schema_defaults",
     "executive_schema_defaults",
+    "DriftItem",
+    "ArtifactComparisonResult",
+    "RepeatRunReport",
+    "MeetingRegressionResult",
+    "RegressionSuiteReport",
 ]

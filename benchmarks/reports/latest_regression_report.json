@@ -1,0 +1,84 @@
+{
+  "total_meetings": 1,
+  "passed_meetings": 0,
+  "failed_meetings": 1,
+  "summary_metrics": {
+    "pass_rate": 0.0
+  },
+  "meeting_results": [
+    {
+      "meeting_id": "MTG-20260402-161107-0bcf93",
+      "category": "strategy-heavy",
+      "difficulty": "medium",
+      "pass_status": false,
+      "artifact_results": [
+        {
+          "artifact_name": "intelligence",
+          "pass_status": false,
+          "critical_drift_count": 1,
+          "soft_drift_count": 0,
+          "metrics": {
+            "missing_golden": true
+          },
+          "drift_items": [
+            {
+              "artifact": "intelligence",
+              "field_path": "golden_snapshot",
+              "severity": "critical",
+              "expected": "present",
+              "actual": "missing",
+              "message": "Missing golden snapshot: benchmarks\\golden\\MTG-20260402-161107-0bcf93\\intelligence.normalized.json"
+            }
+          ]
+        },
+        {
+          "artifact_name": "executive",
+          "pass_status": false,
+          "critical_drift_count": 1,
+          "soft_drift_count": 0,
+          "metrics": {
+            "missing_golden": true
+          },
+          "drift_items": [
+            {
+              "artifact": "executive",
+              "field_path": "golden_snapshot",
+              "severity": "critical",
+              "expected": "present",
+              "actual": "missing",
+              "message": "Missing golden snapshot: benchmarks\\golden\\MTG-20260402-161107-0bcf93\\executive.normalized.json"
+            }
+          ]
+        },
+        {
+          "artifact_name": "decision",
+          "pass_status": false,
+          "critical_drift_count": 1,
+          "soft_drift_count": 0,
+          "metrics": {
+            "missing_golden": true
+          },
+          "drift_items": [
+            {
+              "artifact": "decision",
+              "field_path": "golden_snapshot",
+              "severity": "critical",
+              "expected": "present",
+              "actual": "missing",
+              "message": "Missing golden snapshot: benchmarks\\golden\\MTG-20260402-161107-0bcf93\\decision.normalized.json"
+            }
+          ]
+        }
+      ],
+      "summary_metrics": {
+        "critical_drift_total": 3,
+        "soft_drift_total": 0
+      },
+      "notes": [
+        "Missing golden snapshot: benchmarks\\golden\\MTG-20260402-161107-0bcf93\\intelligence.normalized.json",
+        "Missing golden snapshot: benchmarks\\golden\\MTG-20260402-161107-0bcf93\\executive.normalized.json",
+        "Missing golden snapshot: benchmarks\\golden\\MTG-20260402-161107-0bcf93\\decision.normalized.json"
+      ]
+    }
+  ]
+}

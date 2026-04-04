@@ -6,7 +6,7 @@ Convert existing meeting artifacts into an operational decision ledger for execu
 ## Inputs
 - `transcript_raw.txt`
 - `transcript_clean.txt`
-- `transcript/intelligence.json`
+- `intelligence/intelligence.json` (canonical Phase 06 artifact)
 - `executive/executive_intelligence.json`
 - `mission_registry.json`
 - optional: `reports/decision_intelligence.json` (backward compatibility)

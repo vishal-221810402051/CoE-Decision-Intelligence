@@ -1312,6 +1312,11 @@ def _validate_phase081_integrity(payload: dict[str, Any], transcript: str) -> No
 
 
 def run_intelligence(session_path: str, max_tokens: int = 1200) -> dict[str, Any]:
+    # DEPRECATED CONTRACT NOTE:
+    # This legacy extractor writes `<session_path>/intelligence.json` and is not the
+    # canonical system contract used by active downstream phases.
+    # Canonical intelligence is produced by Phase 06 at:
+    # `data/processed/<meeting_id>/intelligence/intelligence.json`.
     session_dir = Path(session_path)
     clean_path = session_dir / "transcript_clean.txt"
 

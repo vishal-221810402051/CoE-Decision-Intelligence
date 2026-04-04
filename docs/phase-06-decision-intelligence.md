@@ -10,6 +10,9 @@ Convert cleaned transcript text into deterministic, transcript-grounded intellig
 - `data/processed/<meeting_id>/intelligence/intelligence.json`
 - `data/processed/<meeting_id>/metadata/intelligence_metadata.json`
 
+Canonical intelligence contract path:
+- `data/processed/<meeting_id>/intelligence/intelligence.json`
+
 ## Extraction Flow
 - Pass A: chunk-level extraction per category
 - Pass B: global consolidation and summary generation from extracted items only

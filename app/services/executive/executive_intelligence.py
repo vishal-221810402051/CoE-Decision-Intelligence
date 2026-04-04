@@ -9,15 +9,29 @@ from typing import Any
 
 from openai import OpenAI
 
+from app.intelligence.actor_resolver import actor_present_in_transcript
+from app.intelligence.evidence_engine import (
+    SUPPORT_ACCEPTABLE,
+    SUPPORT_DIRECT,
+    SUPPORT_WEAK,
+    build_evidence_binding,
+    is_semantically_supportive,
+)
 from app.config import (
     EXECUTIVE_METADATA_FILE,
     EXECUTIVE_MODEL,
     EXECUTIVE_OUTPUT_DIR,
     EXECUTIVE_OUTPUT_FILE,
     EXECUTIVE_PROMPT_VERSION,
+    EXECUTIVE_SEED,
     MISSION_REGISTRY_PATH,
 )
 from app.models.executive import ExecutiveIntelligenceResult, executive_schema_defaults
+from app.services.intelligence.contract import (
+    adapt_canonical_intelligence_for_downstream,
+    get_canonical_intelligence_path,
+    load_canonical_intelligence,
+)
 
 
 class ExecutiveIntelligenceError(RuntimeError):
@@ -130,19 +144,29 @@ class ExecutiveIntelligenceService:
 
         raw_path = transcript_dir / "transcript_raw.txt"
         clean_path = transcript_dir / "transcript_clean.txt"
-        intelligence_path = transcript_dir / "intelligence.json"
+        canonical_intelligence_path = get_canonical_intelligence_path(meeting_dir)
+        # Legacy optional input only. Active execution must not depend on this file.
         decision_path = Path("reports") / "decision_intelligence.json"
 
-        for required in [raw_path, clean_path, intelligence_path]:
+        for required in [raw_path, clean_path]:
             if not required.exists():
                 raise FileNotFoundError(f"Required artifact not found: {required}")
+        if not canonical_intelligence_path.exists():
+            raise FileNotFoundError(
+                "Canonical intelligence artifact missing. Phase 06 must complete successfully before downstream phases. "
+                f"Expected path: {canonical_intelligence_path}"
+            )
 
         registry_data = load_mission_registry()
         registry_grounding = build_registry_grounding(registry_data)
 
         raw_text = raw_path.read_text(encoding="utf-8")
         clean_text = clean_path.read_text(encoding="utf-8")
-        intelligence = json.loads(intelligence_path.read_text(encoding="utf-8"))
+        try:
+            canonical_intelligence = load_canonical_intelligence(meeting_dir)
+            intelligence = adapt_canonical_intelligence_for_downstream(canonical_intelligence)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ExecutiveIntelligenceError(str(exc)) from exc
         decision_data = {}
         if decision_path.exists():
             decision_data = json.loads(decision_path.read_text(encoding="utf-8"))
@@ -152,23 +176,20 @@ class ExecutiveIntelligenceService:
         output_path = executive_dir / EXECUTIVE_OUTPUT_FILE
         metadata_path = metadata_dir / EXECUTIVE_METADATA_FILE
 
-        response = self.client.chat.completions.create(
-            model=EXECUTIVE_MODEL,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": self._system_prompt()},
-                {
-                    "role": "user",
-                    "content": self._build_prompt(
-                        raw_text=raw_text,
-                        clean_text=clean_text,
-                        intelligence=intelligence,
-                        decision_data=decision_data,
-                        registry_grounding=registry_grounding,
-                    ),
-                },
-            ],
-        )
+        messages = [
+            {"role": "system", "content": self._system_prompt()},
+            {
+                "role": "user",
+                "content": self._build_prompt(
+                    raw_text=raw_text,
+                    clean_text=clean_text,
+                    intelligence=intelligence,
+                    decision_data=decision_data,
+                    registry_grounding=registry_grounding,
+                ),
+            },
+        ]
+        response = self._create_completion(messages)
 
         raw_output = response.choices[0].message.content or ""
         parsed = self._safe_parse_json(raw_output)
@@ -182,7 +203,11 @@ class ExecutiveIntelligenceService:
         self._apply_structural_hardening(parsed)
         self._apply_warning_backstop(parsed)
         self._apply_structural_hardening(parsed)
-        self._validate(parsed)
+        self._enforce_truth_integrity(parsed, clean_text, registry_data, intelligence)
+        self._apply_warning_backstop(parsed)
+        self._enforce_truth_integrity(parsed, clean_text, registry_data, intelligence)
+        self._sort_output_deterministically(parsed)
+        self._validate(parsed, clean_text)
 
         output_path.write_text(
             json.dumps(parsed, indent=2, ensure_ascii=False),
@@ -237,7 +262,33 @@ STRICT RULES:
 - No invented actors, money, dates, authority, or legal structure
 - Use registry grounding for canonical names, institutional roles, and authority interpretation
 - If uncertain, lower confidence instead of inventing
+- Keep language concise and operational
+- Use canonical role wording; avoid stylistic variation
+- Evidence phrases must be exact transcript substrings
+- Do not claim strong consensus unless multiple explicit commitments exist
+- You are a structured compressor of lower-layer intelligence, not an open-ended strategist
+- Do not introduce new business, funding, ownership, governance, or strategic concepts absent from lower-layer intelligence
+- Higher-layer certainty must never exceed lower-layer certainty (UNCERTAIN/CONDITIONAL must stay non-final)
 """
+
+    def _create_completion(self, messages: list[dict[str, str]]) -> Any:
+        try:
+            return self.client.chat.completions.create(
+                model=EXECUTIVE_MODEL,
+                temperature=0,
+                seed=EXECUTIVE_SEED,
+                response_format={"type": "json_object"},
+                messages=messages,
+            )
+        except Exception as exc:
+            text = str(exc).lower()
+            if "seed" not in text and "response_format" not in text and "unsupported" not in text:
+                raise
+            return self.client.chat.completions.create(
+                model=EXECUTIVE_MODEL,
+                temperature=0,
+                messages=messages,
+            )
 
     def _build_prompt(
         self,
@@ -364,6 +415,9 @@ IMPORTANT:
 - Use canonical names from registry.
 - Do not invent missing details.
 - If execution responsibility is high but authority/compensation/governance are unclear, surface that clearly.
+- Derive output from INTELLIGENCE.JSON and DECISION_INTELLIGENCE.JSON anchors only.
+- If lower-layer certainty is UNCERTAIN or CONDITIONAL, keep wording cautious and non-final.
+- Prefer undefined/partial/open when support is weak.
 """
 
     def _safe_parse_json(self, text: str) -> dict[str, Any] | None:
@@ -612,14 +666,438 @@ IMPORTANT:
                     "confidence": "high",
                     "reason": "The delivery owner carries high execution burden while structural control conditions remain insufficiently defined.",
                     "evidence": evidence_text,
+                    "support_level": SUPPORT_DIRECT if evidence_text else SUPPORT_WEAK,
+                    "claim_strength": "direct" if evidence_text else "weak",
+                    "evidence_span": evidence_text,
+                    "evidence_start_index": -1,
+                    "evidence_end_index": -1,
+                    "evidence_confidence": 1.0 if evidence_text else 0.0,
                 }
             )
 
-    def _validate(self, data: dict[str, Any]) -> None:
+    def _evidence_list_from_binding(
+        self,
+        claim: str,
+        transcript: str,
+        preferred: list[str] | None = None,
+        claim_type: str = "generic",
+    ) -> tuple[list[str], dict[str, Any]]:
+        binding = build_evidence_binding(
+            claim=claim,
+            transcript=transcript,
+            preferred_spans=preferred or [],
+            claim_type=claim_type,
+        )
+        if preferred and float(binding.get("evidence_confidence", 0.0)) < 0.5:
+            binding = build_evidence_binding(
+                claim=str(preferred[0]),
+                transcript=transcript,
+                preferred_spans=preferred,
+                claim_type=claim_type,
+            )
+        evidence = [binding["evidence_span"]] if binding.get("evidence_span") else []
+        return evidence, binding
+
+    def _is_supported_actor(self, actor: str, transcript: str, alias_map: dict[str, str]) -> bool:
+        value = str(actor or "").strip()
+        if not value:
+            return False
+        return actor_present_in_transcript(value, transcript, alias_map=alias_map)
+
+    def _attach_claim_meta(
+        self,
+        row: dict[str, Any],
+        claim: str,
+        transcript: str,
+        preferred: list[str] | None = None,
+        claim_type: str = "generic",
+    ) -> dict[str, Any]:
+        evidence, binding = self._evidence_list_from_binding(claim, transcript, preferred, claim_type=claim_type)
+        if evidence:
+            row["evidence"] = evidence[0] if isinstance(row.get("evidence", ""), str) else evidence
+        row["support_level"] = binding["support_level"]
+        row["claim_strength"] = binding["claim_strength"]
+        row["evidence_span"] = binding["evidence_span"]
+        row["evidence_start_index"] = binding["evidence_start_index"]
+        row["evidence_end_index"] = binding["evidence_end_index"]
+        row["evidence_confidence"] = binding["evidence_confidence"]
+        return row
+
+    def _build_intelligence_anchor_corpus(self, intelligence: dict[str, Any]) -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        if not isinstance(intelligence, dict):
+            return rows
+        for family in [
+            "decisions",
+            "risks",
+            "action_plan",
+            "roadmap",
+            "deadlines",
+            "stakeholders",
+            "timeline_mentions",
+        ]:
+            values = intelligence.get(family, [])
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                text = ""
+                for key in ["text", "task", "step", "event", "name", "raw_time_reference"]:
+                    candidate = str(item.get(key, "")).strip()
+                    if candidate:
+                        text = candidate
+                        break
+                if not text:
+                    continue
+                certainty = str(item.get("certainty_class", "UNCERTAIN")).strip().upper()
+                if certainty not in {"DIRECT", "CONDITIONAL", "UNCERTAIN"}:
+                    certainty = "UNCERTAIN"
+                rows.append((text, certainty))
+        summary = str(intelligence.get("summary", "")).strip()
+        if summary:
+            rows.append((summary, "UNCERTAIN"))
+        return rows
+
+    def _tokenize(self, text: str) -> set[str]:
+        return {
+            tok
+            for tok in re.findall(r"[A-Za-z0-9]+", str(text or "").lower())
+            if len(tok) >= 3
+        }
+
+    def _is_claim_anchored(self, claim: str, anchors: list[tuple[str, str]]) -> bool:
+        claim_tokens = self._tokenize(claim)
+        if not claim_tokens:
+            return False
+        for anchor_text, _ in anchors:
+            if len(claim_tokens & self._tokenize(anchor_text)) >= 2:
+                return True
+        return False
+
+    def _certainty_rank(self, value: str) -> int:
+        return {"UNCERTAIN": 0, "CONDITIONAL": 1, "DIRECT": 2}.get(str(value).upper(), 0)
+
+    def _claim_certainty_cap(self, claim: str, anchors: list[tuple[str, str]]) -> str:
+        claim_tokens = self._tokenize(claim)
+        best_overlap = 0
+        best_certainty = "UNCERTAIN"
+        for anchor_text, certainty in anchors:
+            overlap = len(claim_tokens & self._tokenize(anchor_text))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_certainty = certainty
+        return best_certainty if best_overlap >= 2 else "UNCERTAIN"
+
+    def _apply_certainty_cap_to_confidence(self, payload: dict[str, Any], cap: str) -> None:
+        current = str(payload.get("confidence", "low")).lower()
+        rank = {"low": 0, "medium": 1, "high": 2}
+        if cap == "UNCERTAIN" and rank.get(current, 0) > rank["low"]:
+            payload["confidence"] = "low"
+        elif cap == "CONDITIONAL" and rank.get(current, 0) > rank["medium"]:
+            payload["confidence"] = "medium"
+
+    def _enforce_truth_integrity(
+        self,
+        data: dict[str, Any],
+        transcript: str,
+        registry_data: dict[str, Any],
+        intelligence: dict[str, Any],
+    ) -> None:
+        alias_map = build_alias_map(registry_data)
+        anchors = self._build_intelligence_anchor_corpus(intelligence)
+        power = data.get("power_structure", {})
+        ex = data.get("execution_structure", {})
+        role_rows = data.get("role_clarity_assessment", [])
+
+        if isinstance(power, dict):
+            for key in [
+                "sponsor",
+                "strategic_authority",
+                "decision_makers",
+                "advisors",
+                "executors",
+                "implementation_owner",
+            ]:
+                values = power.get(key, [])
+                if not isinstance(values, list):
+                    power[key] = []
+                    continue
+                power[key] = [
+                    item
+                    for item in values
+                    if isinstance(item, str) and self._is_supported_actor(item, transcript, alias_map)
+                ]
+
+        if isinstance(ex, dict):
+            primary_executor = str(ex.get("primary_executor", "")).strip()
+            if primary_executor and not self._is_supported_actor(primary_executor, transcript, alias_map):
+                ex["primary_executor"] = ""
+
+            claim = (
+                f"{ex.get('primary_executor', '')} {ex.get('responsibility_load', '')} "
+                f"{ex.get('authority_clarity', '')} {ex.get('compensation_clarity', '')} {ex.get('governance_clarity', '')}"
+            ).strip()
+            preferred = [ev for ev in ex.get("evidence", []) if isinstance(ev, str)]
+            evidence, binding = self._evidence_list_from_binding(
+                claim, transcript, preferred, claim_type="owner"
+            )
+            ex["evidence"] = evidence
+            ex["support_level"] = binding["support_level"]
+            ex["claim_strength"] = binding["claim_strength"]
+            ex["evidence_span"] = binding["evidence_span"]
+            ex["evidence_start_index"] = binding["evidence_start_index"]
+            ex["evidence_end_index"] = binding["evidence_end_index"]
+            ex["evidence_confidence"] = binding["evidence_confidence"]
+            cap = self._claim_certainty_cap(claim, anchors)
+            ex["certainty_class"] = cap
+            if cap != "DIRECT":
+                ex["authority_clarity"] = "partial" if ex.get("authority_clarity") == "clear" else ex.get("authority_clarity", "undefined")
+
+        if isinstance(role_rows, list):
+            filtered_rows: list[dict[str, Any]] = []
+            for row in role_rows:
+                if not isinstance(row, dict):
+                    continue
+                actor = str(row.get("actor", "")).strip()
+                if actor and not self._is_supported_actor(actor, transcript, alias_map):
+                    continue
+                claim = f"{actor} {row.get('role', '')} {row.get('authority_level', '')} {row.get('responsibility_level', '')}".strip()
+                preferred = [str(row.get("evidence", "")).strip()]
+                row = self._attach_claim_meta(row, claim, transcript, preferred, claim_type="owner")
+                if float(row.get("evidence_confidence", 0.0)) < 0.5:
+                    continue
+                if not self._is_claim_anchored(claim, anchors):
+                    continue
+                cap = self._claim_certainty_cap(claim, anchors)
+                row["certainty_class"] = cap
+                if cap != "DIRECT" and row.get("authority_level") == "high":
+                    row["authority_level"] = "undefined"
+                filtered_rows.append(row)
+            data["role_clarity_assessment"] = filtered_rows
+
+        section_claim_fields = {
+            "executive_summary": ["meaning_of_meeting", "intent", "commitment"],
+            "strategic_objective": ["objective", "business_direction", "success_condition"],
+            "business_model_clarity": [],
+            "risk_posture": [],
+        }
+        for section in section_claim_fields:
+            payload = data.get(section, {})
+            if not isinstance(payload, dict):
+                continue
+            preferred = [ev for ev in payload.get("evidence", []) if isinstance(ev, str)]
+            claim_fields = section_claim_fields.get(section, [])
+            claim = " ".join(str(payload.get(k, "")).strip() for k in claim_fields if str(payload.get(k, "")).strip())
+            if not claim:
+                claim = " ".join(preferred)
+            if not claim and section == "risk_posture":
+                drivers = payload.get("drivers", [])
+                if isinstance(drivers, list):
+                    claim = " ".join(str(d).strip() for d in drivers if str(d).strip())
+            claim_type = "warning" if section == "risk_posture" else "decision"
+            evidence, binding = self._evidence_list_from_binding(claim, transcript, preferred, claim_type=claim_type)
+            if claim and not self._is_claim_anchored(claim, anchors):
+                if section == "business_model_clarity":
+                    payload["revenue_logic"] = "undefined"
+                    payload["funding_logic"] = "undefined"
+                    payload["ownership_model"] = "undefined"
+                    payload["legal_governance"] = "undefined"
+                elif section == "risk_posture":
+                    payload["overall"] = "low"
+                    payload["drivers"] = []
+                else:
+                    for field in claim_fields:
+                        if field in payload:
+                            payload[field] = ""
+                payload["confidence"] = "low"
+                evidence = []
+                binding = {
+                    "support_level": SUPPORT_WEAK,
+                    "claim_strength": "weak",
+                    "evidence_span": "",
+                    "evidence_start_index": -1,
+                    "evidence_end_index": -1,
+                    "evidence_confidence": 0.0,
+                }
+            payload["evidence"] = evidence
+            payload["support_level"] = binding["support_level"]
+            payload["claim_strength"] = binding["claim_strength"]
+            payload["evidence_span"] = binding["evidence_span"]
+            payload["evidence_start_index"] = binding["evidence_start_index"]
+            payload["evidence_end_index"] = binding["evidence_end_index"]
+            payload["evidence_confidence"] = binding["evidence_confidence"]
+            cap = self._claim_certainty_cap(claim, anchors)
+            payload["certainty_class"] = cap
+            self._apply_certainty_cap_to_confidence(payload, cap)
+            if cap in {"UNCERTAIN", "CONDITIONAL"}:
+                for field in claim_fields:
+                    value = str(payload.get(field, ""))
+                    value = re.sub(r"\b(strong consensus|finalized|confirmed agreement|clearly established|definite start)\b", "initial alignment", value, flags=re.IGNORECASE)
+                    payload[field] = value
+
+        flags = data.get("negotiation_flags", [])
+        if isinstance(flags, list):
+            filtered_flags: list[dict[str, Any]] = []
+            for row in flags:
+                if not isinstance(row, dict):
+                    continue
+                claim = f"{row.get('topic', '')} {row.get('status', '')} {row.get('severity', '')}".strip()
+                preferred = [str(row.get("evidence", "")).strip()]
+                row = self._attach_claim_meta(row, claim, transcript, preferred, claim_type="warning")
+                if float(row.get("evidence_confidence", 0.0)) < 0.5:
+                    continue
+                if not self._is_claim_anchored(claim, anchors):
+                    continue
+                row["certainty_class"] = self._claim_certainty_cap(claim, anchors)
+                filtered_flags.append(row)
+            data["negotiation_flags"] = filtered_flags
+
+        warnings = data.get("executive_warnings", [])
+        if isinstance(warnings, list):
+            filtered_warnings: list[dict[str, Any]] = []
+            ex_risk_high = str(ex.get("execution_risk_score", "")).lower() == "high" if isinstance(ex, dict) else False
+            for row in warnings:
+                if not isinstance(row, dict):
+                    continue
+                claim = f"{row.get('warning', '')} {row.get('reason', '')}".strip()
+                preferred = [str(row.get("evidence", "")).strip()]
+                row = self._attach_claim_meta(row, claim, transcript, preferred, claim_type="warning")
+                structural = "execution responsibility is assigned without clearly defined authority" in claim.lower()
+                if (
+                    float(row.get("evidence_confidence", 0.0)) < 0.5
+                    and str(row.get("severity", "")).lower() == "high"
+                    and not (structural and ex_risk_high)
+                ):
+                    continue
+                if not self._is_claim_anchored(claim, anchors):
+                    if not structural:
+                        continue
+                if (
+                    not is_semantically_supportive(claim, str(row.get("evidence_span", "")), claim_type="warning")
+                    and not (structural and ex_risk_high)
+                ):
+                    continue
+                row["certainty_class"] = self._claim_certainty_cap(claim, anchors)
+                filtered_warnings.append(row)
+            data["executive_warnings"] = filtered_warnings
+
+        questions = data.get("recommended_next_questions", [])
+        if isinstance(questions, list):
+            filtered_questions: list[dict[str, Any]] = []
+            authority_gap_exists = bool(power.get("unknown_authority_gaps", [])) if isinstance(power, dict) else False
+            for row in questions:
+                if not isinstance(row, dict):
+                    continue
+                question = str(row.get("question", "")).strip()
+                why_now = str(row.get("why_now", "")).strip()
+                claim = f"{question} {why_now}".strip()
+                if not question:
+                    continue
+                if not self._is_claim_anchored(claim, anchors):
+                    authority_q = (
+                        "final authority" in question.lower()
+                        or "approve or reject" in question.lower()
+                        or "operational approval authority" in question.lower()
+                    )
+                    if not (authority_q and authority_gap_exists):
+                        continue
+                row["question"] = question
+                row["why_now"] = why_now
+                filtered_questions.append(row)
+            data["recommended_next_questions"] = filtered_questions
+
+        summary = data.get("executive_summary", {})
+        if isinstance(summary, dict):
+            meaning = str(summary.get("meaning_of_meeting", ""))
+            if "strong consensus" in meaning.lower():
+                commitment_signals = 0
+                for sentence in re.split(r"(?<=[.!?])\s+", transcript):
+                    lowered = sentence.lower()
+                    if any(sig in lowered for sig in ["we will", "i will", "agreed", "yes", "let's"]):
+                        commitment_signals += 1
+                if commitment_signals < 3:
+                    summary["meaning_of_meeting"] = re.sub(
+                        r"strong consensus",
+                        "initial alignment",
+                        meaning,
+                        flags=re.IGNORECASE,
+                    )
+                    summary["support_level"] = SUPPORT_WEAK
+                    summary["claim_strength"] = "weak"
+
+    def _sort_output_deterministically(self, data: dict[str, Any]) -> None:
+        power = data.get("power_structure", {})
+        if isinstance(power, dict):
+            for key in [
+                "sponsor",
+                "strategic_authority",
+                "decision_makers",
+                "advisors",
+                "executors",
+                "implementation_owner",
+                "unknown_authority_gaps",
+            ]:
+                value = power.get(key, [])
+                if isinstance(value, list):
+                    power[key] = sorted(
+                        [item for item in value if isinstance(item, str)],
+                        key=lambda x: x.lower(),
+                    )
+
+        rows = data.get("role_clarity_assessment", [])
+        if isinstance(rows, list):
+            data["role_clarity_assessment"] = sorted(
+                [row for row in rows if isinstance(row, dict)],
+                key=lambda row: (
+                    str(row.get("actor", "")).lower(),
+                    str(row.get("role", "")).lower(),
+                ),
+            )
+
+        flags = data.get("negotiation_flags", [])
+        if isinstance(flags, list):
+            data["negotiation_flags"] = sorted(
+                [row for row in flags if isinstance(row, dict)],
+                key=lambda row: (
+                    str(row.get("topic", "")).lower(),
+                    str(row.get("status", "")).lower(),
+                    str(row.get("severity", "")).lower(),
+                    str(row.get("evidence", "")).lower(),
+                ),
+            )
+
+        warnings = data.get("executive_warnings", [])
+        if isinstance(warnings, list):
+            data["executive_warnings"] = sorted(
+                [row for row in warnings if isinstance(row, dict)],
+                key=lambda row: (
+                    str(row.get("severity", "")).lower(),
+                    str(row.get("reason", "")).lower(),
+                    str(row.get("warning", "")).lower(),
+                    str(row.get("evidence", "")).lower(),
+                ),
+            )
+
+        questions = data.get("recommended_next_questions", [])
+        if isinstance(questions, list):
+            priority_rank = {"high": 0, "medium": 1, "low": 2}
+            data["recommended_next_questions"] = sorted(
+                [row for row in questions if isinstance(row, dict)],
+                key=lambda row: (
+                    priority_rank.get(str(row.get("priority", "")).lower(), 9),
+                    str(row.get("question", "")).lower(),
+                    str(row.get("why_now", "")).lower(),
+                ),
+            )
+
+    def _validate(self, data: dict[str, Any], transcript: str) -> None:
         allowed_hml = {"high", "medium", "low"}
         allowed_clear = {"clear", "partial", "undefined"}
         allowed_authority = {"high", "medium", "low", "undefined"}
         allowed_status = {"open", "partially_defined"}
+        allowed_support = {SUPPORT_DIRECT, SUPPORT_ACCEPTABLE, SUPPORT_WEAK}
+        allowed_certainty = {"UNCERTAIN", "CONDITIONAL", "DIRECT"}
 
         for section in [
             "executive_summary",
@@ -674,6 +1152,25 @@ IMPORTANT:
                 raise ExecutiveIntelligenceError("Invalid warning confidence")
             if not row.get("warning") or not row.get("reason"):
                 raise ExecutiveIntelligenceError("Invalid executive warning payload")
+
+        for section in [
+            data.get("executive_summary", {}),
+            data.get("strategic_objective", {}),
+            data.get("execution_structure", {}),
+            data.get("business_model_clarity", {}),
+            data.get("risk_posture", {}),
+        ]:
+            if not isinstance(section, dict):
+                continue
+            support_level = section.get("support_level")
+            if support_level and support_level not in allowed_support:
+                raise ExecutiveIntelligenceError("Invalid support_level in executive payload")
+            span = str(section.get("evidence_span", "")).strip()
+            if span and span not in transcript:
+                raise ExecutiveIntelligenceError("Non-verbatim executive evidence_span detected")
+            certainty = str(section.get("certainty_class", "")).strip().upper()
+            if certainty and certainty not in allowed_certainty:
+                raise ExecutiveIntelligenceError("Invalid certainty_class in executive payload")
 
         execution_structure = data.get("execution_structure", {})
         executive_summary = data.get("executive_summary", {})
