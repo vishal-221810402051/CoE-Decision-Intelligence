@@ -157,7 +157,16 @@ def generate_meeting_report(meeting_id: str) -> dict[str, Any]:
         result = generate_report(meeting_id)
         status = str(result.get("status", "")).strip()
         if status == "completed":
-            return {"ok": True, **result, "message": "Report generation completed."}
+            pdf_status = str(result.get("pdf_status", "")).strip()
+            if pdf_status == "generated":
+                message = "Report generated successfully."
+            elif pdf_status == "failed":
+                message = "PDF generation failed, HTML available."
+            elif pdf_status == "unavailable":
+                message = "PDF generation unavailable, HTML available."
+            else:
+                message = "Report generated successfully."
+            return {"ok": True, **result, "message": message}
         if status == "blocked":
             return {"ok": False, **result, "message": str(result.get("error", "Report generation blocked."))}
         return {"ok": False, **result, "message": str(result.get("error", "Report generation failed."))}
