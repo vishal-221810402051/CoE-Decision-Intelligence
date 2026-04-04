@@ -327,7 +327,13 @@ def _normalize_risks(intelligence_data: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for risk in _to_list(intelligence_data.get("risks")):
         if isinstance(risk, dict):
-            risk_text = _clean_text(risk.get("risk") or risk.get("description") or risk.get("title") or "")
+            risk_text = _clean_text(
+                risk.get("risk")
+                or risk.get("description")
+                or risk.get("title")
+                or risk.get("text")
+                or ""
+            )
             severity = _clean_text(risk.get("severity", "medium")).lower() or "medium"
             confidence = _clean_text(risk.get("confidence", "low")).lower() or "low"
             owner = _clean_text(risk.get("owner") or risk.get("actor") or "")
@@ -347,6 +353,7 @@ def _normalize_risks(intelligence_data: dict[str, Any]) -> list[dict[str, Any]]:
                 "confidence": confidence,
                 "owner": owner,
                 "mitigation": None,
+                "source": "intelligence",
             }
         )
     return rows
@@ -373,6 +380,7 @@ def _normalize_actions(intelligence_data: dict[str, Any]) -> list[dict[str, Any]
                 "owner": owner,
                 "status": "open",
                 "due_hint": due_hint,
+                "source": "intelligence",
             }
         )
     return rows
@@ -402,9 +410,453 @@ def _normalize_timeline(intelligence_data: dict[str, Any]) -> list[dict[str, Any
                 "signal": signal,
                 "type": signal_type,
                 "confidence": confidence_value,
+                "sources": ["intelligence"],
             }
         )
     return timeline_rows
+
+
+def _dedupe_key(*values: Any) -> str:
+    return "|".join(_clean_text(value).lower() for value in values if _clean_text(value))
+
+
+def _normalize_severity(value: Any, default: str = "medium") -> str:
+    normalized = _clean_text(value).lower()
+    if normalized in {"high", "medium", "low"}:
+        return normalized
+    return default
+
+
+def _normalize_confidence(value: Any, default: str = "medium") -> str:
+    normalized = _clean_text(value).lower()
+    if normalized in {"high", "medium", "low"}:
+        return normalized
+    return default
+
+
+def aggregate_risks(
+    intelligence: dict[str, Any],
+    executive: dict[str, Any],
+    decision: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_risk(row: dict[str, Any]) -> None:
+        risk_text = _clean_text(row.get("risk", ""))
+        if not risk_text:
+            return
+        key = _dedupe_key(risk_text)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        rows.append(
+            {
+                "risk": risk_text,
+                "severity": _normalize_severity(row.get("severity"), "medium"),
+                "confidence": _normalize_confidence(row.get("confidence"), "medium"),
+                "owner": _clean_text(row.get("owner", "")),
+                "mitigation": row.get("mitigation"),
+                "source": _clean_text(row.get("source", "")) or "unknown",
+                "notes": _clean_text(row.get("notes", "")),
+            }
+        )
+
+    for row in _normalize_risks(intelligence):
+        add_risk(row)
+
+    risk_posture = executive.get("risk_posture", {})
+    if isinstance(risk_posture, dict):
+        for driver in _to_list(risk_posture.get("drivers")):
+            add_risk(
+                {
+                    "risk": driver,
+                    "severity": risk_posture.get("overall", "medium"),
+                    "confidence": risk_posture.get("confidence", "medium"),
+                    "source": "executive.risk_posture",
+                }
+            )
+
+    for warning in _to_list(executive.get("executive_warnings")):
+        if not isinstance(warning, dict):
+            continue
+        add_risk(
+            {
+                "risk": warning.get("warning", ""),
+                "severity": warning.get("severity", "medium"),
+                "confidence": warning.get("confidence", "medium"),
+                "source": "executive.executive_warnings",
+                "notes": warning.get("reason", ""),
+            }
+        )
+
+    for flag in _to_list(executive.get("negotiation_flags")):
+        if not isinstance(flag, dict):
+            continue
+        if _normalize_severity(flag.get("severity", "low"), "low") != "high":
+            continue
+        add_risk(
+            {
+                "risk": flag.get("topic", ""),
+                "severity": flag.get("severity", "high"),
+                "confidence": flag.get("confidence", "medium"),
+                "source": "executive.negotiation_flags",
+                "notes": f"status={_clean_text(flag.get('status', 'open')) or 'open'}",
+            }
+        )
+
+    for record in _to_list(decision.get("decision_records")):
+        if not isinstance(record, dict):
+            continue
+        statement = _clean_text(record.get("statement", ""))
+        state = _clean_text(record.get("state", ""))
+        if state == "blocked" and statement:
+            add_risk(
+                {
+                    "risk": statement,
+                    "severity": "high",
+                    "confidence": _normalize_confidence(record.get("confidence", "medium"), "medium"),
+                    "source": "decision.blocked_decision",
+                    "notes": "Decision state is blocked.",
+                }
+            )
+
+        for dep in _to_list(record.get("dependencies")):
+            if not isinstance(dep, dict):
+                continue
+            if _clean_text(dep.get("status", "")).lower() != "open":
+                continue
+            if _clean_text(dep.get("blocking_level", "")).lower() != "high":
+                continue
+            add_risk(
+                {
+                    "risk": dep.get("reason", "") or f"Open high dependency: {_clean_text(dep.get('type', 'dependency'))}",
+                    "severity": "high",
+                    "confidence": "medium",
+                    "source": "decision.dependencies",
+                    "notes": _clean_text(dep.get("type", "")),
+                }
+            )
+
+    operational_summary = decision.get("operational_summary", {})
+    if isinstance(operational_summary, dict):
+        for blocker in _to_list(operational_summary.get("high_blockers")):
+            add_risk(
+                {
+                    "risk": blocker,
+                    "severity": "high",
+                    "confidence": "medium",
+                    "source": "decision.operational_summary",
+                    "notes": "Listed as high blocker.",
+                }
+            )
+
+    if not rows:
+        rows.append(
+            {
+                "risk": "No explicit risks identified from available signals",
+                "severity": "low",
+                "confidence": "low",
+                "owner": "",
+                "mitigation": None,
+                "source": "system",
+                "notes": "",
+            }
+        )
+    return rows
+
+
+def aggregate_actions(
+    intelligence: dict[str, Any],
+    executive: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    actions: list[dict[str, Any]] = []
+    follow_ups: list[dict[str, Any]] = []
+    seen_actions: set[str] = set()
+    seen_followups: set[str] = set()
+
+    def add_action(row: dict[str, Any]) -> None:
+        action_text = _clean_text(row.get("action", ""))
+        if not action_text:
+            return
+        key = _dedupe_key(action_text, row.get("owner", ""))
+        if not key or key in seen_actions:
+            return
+        seen_actions.add(key)
+        actions.append(
+            {
+                "action": action_text,
+                "owner": _clean_text(row.get("owner", "")),
+                "status": _clean_text(row.get("status", "open")).lower() or "open",
+                "due_hint": _clean_text(row.get("due_hint", "")) or None,
+                "source": _clean_text(row.get("source", "")) or "unknown",
+            }
+        )
+
+    def add_follow_up(question: str, source: str, priority: str = "medium") -> None:
+        text = _clean_text(question)
+        if not text:
+            return
+        key = _dedupe_key(text)
+        if not key or key in seen_followups:
+            return
+        seen_followups.add(key)
+        follow_ups.append(
+            {
+                "question": text,
+                "priority": _normalize_severity(priority, "medium"),
+                "source": source,
+            }
+        )
+
+    for row in _normalize_actions(intelligence):
+        add_action(row)
+
+    for record in _to_list(decision.get("decision_records")):
+        if not isinstance(record, dict):
+            continue
+        primary_owner = _clean_text(record.get("primary_owner", ""))
+
+        for commitment in _to_list(record.get("commitments")):
+            if not isinstance(commitment, dict):
+                continue
+            add_action(
+                {
+                    "action": commitment.get("commitment", ""),
+                    "owner": commitment.get("actor", "") or primary_owner,
+                    "status": commitment.get("status", "open"),
+                    "due_hint": None,
+                    "source": "decision.commitments",
+                }
+            )
+
+        for gap in _to_list(record.get("decision_gaps")):
+            if not isinstance(gap, dict):
+                continue
+            add_action(
+                {
+                    "action": gap.get("question", "") or gap.get("gap_type", ""),
+                    "owner": primary_owner,
+                    "status": "open",
+                    "due_hint": None,
+                    "source": "decision.gaps",
+                }
+            )
+
+        for dep in _to_list(record.get("dependencies")):
+            if not isinstance(dep, dict):
+                continue
+            if _clean_text(dep.get("status", "")).lower() != "open":
+                continue
+            add_action(
+                {
+                    "action": dep.get("reason", "") or f"Resolve {_clean_text(dep.get('type', 'dependency'))}",
+                    "owner": primary_owner,
+                    "status": "open",
+                    "due_hint": None,
+                    "source": "decision.dependencies",
+                }
+            )
+
+    for row in _to_list(executive.get("recommended_next_questions")):
+        if not isinstance(row, dict):
+            continue
+        add_follow_up(
+            question=str(row.get("question", "")),
+            source="executive.recommended_next_questions",
+            priority=str(row.get("priority", "medium")),
+        )
+
+    if not actions:
+        actions.append(
+            {
+                "action": "No explicit actions identified from available signals",
+                "owner": "",
+                "status": "open",
+                "due_hint": None,
+                "source": "system",
+            }
+        )
+
+    if not follow_ups:
+        follow_ups.append(
+            {
+                "question": "No explicit follow-up questions identified from available signals",
+                "priority": "low",
+                "source": "system",
+            }
+        )
+
+    return {"actions": actions, "follow_ups": follow_ups}
+
+
+def aggregate_timeline(intelligence: dict[str, Any], decision: dict[str, Any]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+
+    def add_timeline(signal: Any, signal_type: Any, confidence: Any, source: str) -> None:
+        signal_text = _clean_text(signal)
+        type_text = _clean_text(signal_type) or "timeline_signal"
+        if not signal_text:
+            return
+        key = _dedupe_key(signal_text, type_text)
+        if not key:
+            return
+
+        confidence_value: Any = confidence
+        if isinstance(confidence, (int, float)):
+            confidence_value = round(float(confidence), 3)
+        else:
+            normalized_conf = _normalize_confidence(confidence, "")
+            confidence_value = normalized_conf if normalized_conf else _clean_text(confidence) or "medium"
+
+        row = merged.get(key)
+        if row is None:
+            merged[key] = {
+                "signal": signal_text,
+                "type": type_text,
+                "confidence": confidence_value,
+                "sources": [source],
+            }
+            return
+
+        if source not in row["sources"]:
+            row["sources"].append(source)
+
+        rank = {"low": 1, "medium": 2, "high": 3}
+        current = str(row.get("confidence", "")).lower()
+        incoming = str(confidence_value).lower()
+        if incoming in rank and (current not in rank or rank[incoming] > rank[current]):
+            row["confidence"] = incoming
+
+    for row in _to_list(intelligence.get("timeline_mentions")):
+        if isinstance(row, dict):
+            add_timeline(
+                row.get("text") or row.get("signal") or row.get("raw_time_reference"),
+                row.get("type") or _timeline_type(_clean_text(row.get("text") or row.get("signal") or "")),
+                row.get("confidence") or row.get("support_level"),
+                "intelligence.timeline_mentions",
+            )
+        else:
+            add_timeline(row, _timeline_type(_clean_text(row)), "medium", "intelligence.timeline_mentions")
+
+    for row in _to_list(intelligence.get("deadlines")):
+        if not isinstance(row, dict):
+            continue
+        signal = _clean_text(row.get("date") or row.get("event"))
+        add_timeline(
+            signal,
+            "deadline_hint",
+            row.get("confidence") or row.get("support_level") or "medium",
+            "intelligence.deadlines",
+        )
+
+    for record in _to_list(decision.get("decision_records")):
+        if not isinstance(record, dict):
+            continue
+        for signal in _to_list(record.get("timeline_signals")):
+            if not isinstance(signal, dict):
+                continue
+            add_timeline(
+                signal.get("raw_reference") or signal.get("signal"),
+                signal.get("signal_type") or signal.get("type") or "timeline_signal",
+                signal.get("confidence", "medium"),
+                "decision.timeline_signals",
+            )
+
+    output = list(merged.values())
+    output.sort(key=lambda item: (_clean_text(item.get("signal", "")).lower(), _clean_text(item.get("type", "")).lower()))
+    if not output:
+        output.append(
+            {
+                "signal": "No explicit timeline signals identified from available signals",
+                "type": "timeline_signal",
+                "confidence": "low",
+                "sources": ["system"],
+            }
+        )
+    return output
+
+
+def build_governance_section(executive: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    power = executive.get("power_structure", {})
+    execution = executive.get("execution_structure", {})
+    roles = _to_list(executive.get("role_clarity_assessment"))
+    operational = decision.get("operational_summary", {})
+
+    key_gaps: list[str] = []
+    seen: set[str] = set()
+
+    def add_gap(text: Any) -> None:
+        gap = _clean_text(text)
+        key = gap.lower()
+        if not gap or key in seen:
+            return
+        seen.add(key)
+        key_gaps.append(gap)
+
+    if isinstance(power, dict):
+        for item in _to_list(power.get("unknown_authority_gaps")):
+            add_gap(item)
+
+    if isinstance(execution, dict):
+        for field in ["authority_clarity", "compensation_clarity", "governance_clarity"]:
+            value = _clean_text(execution.get(field, ""))
+            if value in {"partial", "undefined"}:
+                add_gap(f"{field} is {value}")
+
+    for row in roles:
+        if not isinstance(row, dict):
+            continue
+        clarity = _clean_text(row.get("clarity", "")).lower()
+        if clarity in {"partial", "undefined"}:
+            add_gap(f"Role clarity for {_clean_text(row.get('actor', 'unknown'))} is {clarity}")
+
+    for record in _to_list(decision.get("decision_records")):
+        if not isinstance(record, dict):
+            continue
+        for dep in _to_list(record.get("dependencies")):
+            if not isinstance(dep, dict):
+                continue
+            dep_type = _clean_text(dep.get("type", "")).lower()
+            dep_status = _clean_text(dep.get("status", "")).lower()
+            if dep_status == "open" and dep_type in {"authority_dependency", "governance_dependency"}:
+                add_gap(dep.get("reason", "") or f"Open {dep_type}")
+
+    missing_owner_count = 0
+    if isinstance(operational, dict):
+        try:
+            missing_owner_count = int(operational.get("missing_owners_count", 0))
+        except Exception:
+            missing_owner_count = 0
+
+    return {
+        "authority_clarity": _clean_text(execution.get("authority_clarity", "unknown")) if isinstance(execution, dict) else "unknown",
+        "execution_clarity": _clean_text(execution.get("execution_risk_score", "unknown")) if isinstance(execution, dict) else "unknown",
+        "primary_executor": _clean_text(execution.get("primary_executor", "")) if isinstance(execution, dict) else "",
+        "missing_owners_count": missing_owner_count,
+        "key_gaps": key_gaps,
+    }
+
+
+def build_operational_summary(decision: dict[str, Any]) -> dict[str, Any]:
+    operational = decision.get("operational_summary", {})
+    if not isinstance(operational, dict):
+        operational = {}
+    try:
+        blocked_count = int(operational.get("blocked_count", 0))
+    except Exception:
+        blocked_count = 0
+    try:
+        open_dependencies_count = int(operational.get("open_dependencies_count", 0))
+    except Exception:
+        open_dependencies_count = 0
+
+    return {
+        "blocked_count": blocked_count,
+        "open_dependencies_count": open_dependencies_count,
+        "high_blockers": _to_list(operational.get("high_blockers")),
+    }
 
 
 def build_report_payload(meeting_id: str, mode: str) -> dict[str, Any]:
@@ -443,9 +895,13 @@ def build_report_payload(meeting_id: str, mode: str) -> dict[str, Any]:
 
     executive_summary_bullets = _split_to_bullets(executive_summary_seed, minimum=3, maximum=5)
     decisions = _normalize_decisions(decision)
-    risks = _normalize_risks(intelligence)
-    actions = _normalize_actions(intelligence)
-    timeline = _normalize_timeline(intelligence)
+    risks = aggregate_risks(intelligence, executive, decision)
+    action_bundle = aggregate_actions(intelligence, executive, decision)
+    actions = action_bundle["actions"]
+    follow_ups = action_bundle["follow_ups"]
+    timeline = aggregate_timeline(intelligence, decision)
+    governance = build_governance_section(executive, decision)
+    operational_summary = build_operational_summary(decision)
     stakeholders = _to_list(intelligence.get("stakeholders"))
     entities = _extract_entities(stakeholders, decisions)
 
@@ -476,14 +932,23 @@ def build_report_payload(meeting_id: str, mode: str) -> dict[str, Any]:
         "executive_summary": executive_summary_bullets,
         "decisions": decisions,
         "key_decisions": decisions,
+        "governance": governance,
         "risks": risks,
         "actions": actions,
+        "follow_ups": follow_ups,
         "timeline": timeline,
+        "operational_summary": operational_summary,
         "notes": notes,
         "doc_validation": doc_validation,
     }
 
     return {
+        "header": {
+            "meeting_id": meeting_id,
+            "processing_mode": mode,
+            "generated_at": _now_iso(),
+            "report_version": "v1",
+        },
         "meeting_id": meeting_id,
         "processing_mode": mode,
         "generated_at": _now_iso(),
@@ -571,10 +1036,56 @@ def generate_html_report(payload: dict[str, Any]) -> str:
     )
 
 
-def _pdf_table_data(rows: list[dict[str, Any]], headers: list[str]) -> list[list[str]]:
-    table: list[list[str]] = [headers]
+def _truncate_pdf_cell_text(text: str, max_length: int = 300) -> str:
+    cleaned = _clean_text(text)
+    if len(cleaned) <= max_length:
+        return cleaned
+    return f"{cleaned[:max_length]}..."
+
+
+def _pdf_column_widths(headers: list[str], usable_width: float) -> list[float]:
+    key = tuple(headers)
+    ratio_map: dict[tuple[str, ...], list[float]] = {
+        ("decision", "owner", "confidence", "evidence_count"): [0.50, 0.20, 0.15, 0.15],
+        ("risk", "severity", "confidence", "owner", "mitigation"): [0.45, 0.15, 0.10, 0.15, 0.15],
+        ("action", "owner", "status", "due_hint"): [0.50, 0.20, 0.15, 0.15],
+        ("signal", "type", "confidence"): [0.50, 0.25, 0.25],
+        ("doc_id", "status", "overlap_score", "matched_entities", "matched_phrases"): [0.20, 0.10, 0.10, 0.30, 0.30],
+    }
+
+    ratios = ratio_map.get(key)
+    if ratios and len(ratios) == len(headers):
+        return [usable_width * ratio for ratio in ratios]
+
+    equal_width = usable_width / max(len(headers), 1)
+    return [equal_width for _ in headers]
+
+
+def _pdf_table_data(
+    rows: list[dict[str, Any]],
+    headers: list[str],
+    paragraph_builder: Any,
+) -> list[list[Any]]:
+    table: list[list[Any]] = [headers]
+
     for row in rows:
-        table.append([_clean_text(row.get(header, "")) for header in headers])
+        record: list[Any] = []
+        for header in headers:
+            value = row.get(header, "")
+
+            if isinstance(value, list):
+                text = ", ".join(_clean_text(item) for item in value if _clean_text(item))
+            else:
+                text = _clean_text(value)
+
+            text = _truncate_pdf_cell_text(text)
+
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                record.append(text)
+            else:
+                record.append(paragraph_builder(text))
+        table.append(record)
+
     return table
 
 
@@ -583,7 +1094,15 @@ def generate_pdf_report(payload: dict[str, Any], output_path: Path) -> dict[str,
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import LETTER
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.platypus import (
+            ListFlowable,
+            ListItem,
+            Paragraph,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
     except Exception:
         return {
             "ok": False,
@@ -594,6 +1113,7 @@ def generate_pdf_report(payload: dict[str, Any], output_path: Path) -> dict[str,
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         doc = SimpleDocTemplate(str(output_path), pagesize=LETTER)
+        usable_width = doc.width
         styles = getSampleStyleSheet()
         story: list[Any] = []
 
@@ -615,14 +1135,23 @@ def generate_pdf_report(payload: dict[str, Any], output_path: Path) -> dict[str,
             story.append(Paragraph("No executive summary available.", styles["Normal"]))
         story.append(Spacer(1, 12))
 
+        def make_cell_paragraph(text: str) -> Any:
+            return Paragraph(_truncate_pdf_cell_text(text), styles["Normal"])
+
         def add_table_section(title_text: str, rows: list[dict[str, Any]], headers: list[str]) -> None:
             story.append(Paragraph(title_text, styles["Heading2"]))
             if not rows:
                 story.append(Paragraph("None", styles["Normal"]))
                 story.append(Spacer(1, 8))
                 return
-            data = _pdf_table_data(rows, headers)
-            table = Table(data, repeatRows=1)
+            data = _pdf_table_data(rows, headers, make_cell_paragraph)
+            col_widths = _pdf_column_widths(headers, usable_width)
+            table = Table(
+                data,
+                colWidths=col_widths,
+                repeatRows=1,
+                hAlign="LEFT",
+            )
             table.setStyle(
                 TableStyle(
                     [
@@ -630,6 +1159,11 @@ def generate_pdf_report(payload: dict[str, Any], output_path: Path) -> dict[str,
                         ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
                         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#9ca3af")),
                         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("WORDWRAP", (0, 0), (-1, -1), "CJK"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                         ("FONTSIZE", (0, 0), (-1, -1), 8),
                     ]
                 )
