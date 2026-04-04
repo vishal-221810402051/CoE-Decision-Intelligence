@@ -16,10 +16,16 @@ from app.ui.components import (
     render_status_strip,
     render_text_panel,
 )
+from app.ui.actions import (
+    generate_meeting_report,
+    get_processing_mode_state,
+    save_processing_mode_state,
+)
 from app.ui.repository import (
     find_report_pdf,
     get_artifact_paths,
     list_meeting_metadata,
+    list_meeting_source_docs,
     list_meeting_source_pdfs,
     list_meetings,
     safe_read_json,
@@ -53,6 +59,69 @@ def main() -> None:
 
     paths = get_artifact_paths(meeting_id)
     metadata_map = list_meeting_metadata(meeting_id)
+    source_docs = list_meeting_source_docs(meeting_id)
+
+    st.divider()
+    st.subheader("Processing Mode")
+    mode_state = get_processing_mode_state(meeting_id)
+    mode_options = ["transcript_only", "transcript_plus_docs"]
+    mode_labels = {
+        "transcript_only": "Transcript-only",
+        "transcript_plus_docs": "Transcript + Source Docs",
+    }
+    mode_index = mode_options.index(mode_state.get("processing_mode", "transcript_only")) if mode_state.get("processing_mode", "transcript_only") in mode_options else 0
+
+    with st.form("processing_mode_form", clear_on_submit=False):
+        selected_mode = st.selectbox(
+            "Mode",
+            options=mode_options,
+            index=mode_index,
+            format_func=lambda item: mode_labels.get(item, item),
+        )
+
+        available_doc_ids = [str(item.get("doc_id", "")).strip() for item in source_docs if str(item.get("doc_id", "")).strip()]
+        selected_doc_ids: list[str] = []
+        if selected_mode == "transcript_plus_docs":
+            if available_doc_ids:
+                label_map: dict[str, str] = {}
+                for item in source_docs:
+                    doc_id = str(item.get("doc_id", "")).strip()
+                    if not doc_id:
+                        continue
+                    role = str(item.get("document_role", "")).strip()
+                    name = str(item.get("source_file_name", "")).strip()
+                    label_map[doc_id] = f"{doc_id} | {role or 'unknown_role'} | {name or 'unknown_file'}"
+                defaults = [doc_id for doc_id in mode_state.get("selected_source_doc_ids", []) if doc_id in available_doc_ids]
+                selected_doc_ids = st.multiselect(
+                    "Selected Source Docs",
+                    options=available_doc_ids,
+                    default=defaults,
+                    format_func=lambda item: label_map.get(item, item),
+                    help="Transcript + Source Docs mode requires valid selected PDFs.",
+                )
+            else:
+                st.warning("No meeting-scoped source docs available.")
+        save_mode = st.form_submit_button("Save Processing Mode")
+
+    if save_mode:
+        save_result = save_processing_mode_state(
+            meeting_id=meeting_id,
+            mode=selected_mode,
+            selected_doc_ids=selected_doc_ids,
+        )
+        if save_result.get("ok"):
+            st.success(str(save_result.get("message", "Processing mode saved.")))
+            st.rerun()
+        else:
+            st.error(str(save_result.get("message", "Failed to save processing mode.")))
+
+    if st.button("Generate Report", key=f"generate_report_{meeting_id}"):
+        generation_result = generate_meeting_report(meeting_id)
+        if generation_result.get("ok"):
+            st.success(str(generation_result.get("message", "Report generation completed.")))
+        else:
+            st.error(str(generation_result.get("message", "Report generation failed.")))
+        st.rerun()
 
     tabs = st.tabs(
         [
@@ -98,13 +167,31 @@ def main() -> None:
 
     with tabs[5]:
         st.subheader("Report PDF")
+        report_metadata = safe_read_json(paths["report_metadata"])
+        if isinstance(report_metadata, dict):
+            report_status = str(report_metadata.get("status", "")).strip()
+            if report_status == "completed":
+                st.success("Report status: completed")
+            elif report_status == "blocked":
+                st.warning("Report status: blocked")
+            elif report_status:
+                st.error(f"Report status: {report_status}")
+            report_error = str(report_metadata.get("error", "")).strip()
+            if report_error:
+                st.error(report_error)
+            with st.expander("Report Metadata", expanded=False):
+                st.json(report_metadata)
+
         report_pdf = find_report_pdf(meeting_id)
         if report_pdf is None:
-            st.info("Report PDF generation not implemented yet.")
+            if isinstance(report_metadata, dict) and str(report_metadata.get("status", "")).strip() == "completed":
+                st.info("Report generated (HTML payload available), but no PDF was produced in this environment.")
+            else:
+                st.info("Report not generated yet.")
         elif report_pdf.exists():
             render_pdf_panel(report_pdf, "Report PDF Preview")
         else:
-            st.info("Report PDF generation not implemented yet.")
+            st.info("Report not generated yet.")
 
         st.divider()
         st.subheader("Source Document PDFs")
@@ -143,4 +230,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -12,6 +12,8 @@ from app.config import (
 )
 from app.services.audio import AudioIntakeService
 from app.services.context.document_intake import DocumentIntakeService
+from app.services.processing_mode import get_processing_mode, set_processing_mode
+from app.services.reporting import generate_report
 
 
 def _write_temp_upload(uploaded_file: Any, target_dir: Path) -> Path:
@@ -115,3 +117,49 @@ def source_doc_upload(
             except Exception:
                 pass
 
+
+def get_processing_mode_state(meeting_id: str) -> dict[str, Any]:
+    try:
+        return get_processing_mode(meeting_id)
+    except Exception:
+        return {
+            "meeting_id": str(meeting_id).strip(),
+            "processing_mode": "transcript_only",
+            "source_doc_validation_enabled": False,
+            "selected_source_doc_ids": [],
+            "report_mode": "transcript_only",
+        }
+
+
+def save_processing_mode_state(
+    meeting_id: str,
+    mode: str,
+    selected_doc_ids: list[str] | None,
+) -> dict[str, Any]:
+    try:
+        payload = set_processing_mode(
+            meeting_id=meeting_id,
+            mode=mode,
+            selected_doc_ids=selected_doc_ids,
+        )
+        return {
+            "ok": True,
+            "mode": payload.get("processing_mode", "transcript_only"),
+            "selected_source_doc_ids": payload.get("selected_source_doc_ids", []),
+            "message": "Processing mode saved.",
+        }
+    except Exception as exc:
+        return {"ok": False, "message": f"Failed to save processing mode: {exc}"}
+
+
+def generate_meeting_report(meeting_id: str) -> dict[str, Any]:
+    try:
+        result = generate_report(meeting_id)
+        status = str(result.get("status", "")).strip()
+        if status == "completed":
+            return {"ok": True, **result, "message": "Report generation completed."}
+        if status == "blocked":
+            return {"ok": False, **result, "message": str(result.get("error", "Report generation blocked."))}
+        return {"ok": False, **result, "message": str(result.get("error", "Report generation failed."))}
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "message": f"Report generation failed: {exc}"}

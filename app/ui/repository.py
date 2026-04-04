@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.config import config
+from app.config import PROCESSING_MODE_FILE, config
 
 
 def get_meeting_dir(meeting_id: str) -> Path:
@@ -34,6 +34,7 @@ def safe_read_json(path: Path) -> dict[str, Any] | None:
 
 def get_artifact_paths(meeting_id: str) -> dict[str, Path]:
     meeting_dir = get_meeting_dir(meeting_id)
+    report_dir = meeting_dir / "report"
     return {
         "meeting_dir": meeting_dir,
         "source_dir": meeting_dir / "source",
@@ -45,6 +46,12 @@ def get_artifact_paths(meeting_id: str) -> dict[str, Path]:
         "executive": meeting_dir / "executive" / "executive_intelligence.json",
         "decision": meeting_dir / "decision" / "decision_intelligence_v2.json",
         "metadata_dir": meeting_dir / "metadata",
+        "processing_mode": meeting_dir / "metadata" / PROCESSING_MODE_FILE,
+        "report_dir": report_dir,
+        "report_payload": report_dir / "report_payload.json",
+        "report_html": report_dir / "report.html",
+        "report_pdf": report_dir / "report.pdf",
+        "report_metadata": report_dir / "report_metadata.json",
     }
 
 
@@ -60,19 +67,50 @@ def list_meeting_metadata(meeting_id: str) -> dict[str, dict[str, Any] | None]:
 
 
 def list_meeting_source_pdfs(meeting_id: str) -> list[Path]:
-    docs_root = get_meeting_dir(meeting_id) / "docs"
-    if not docs_root.exists() or not docs_root.is_dir():
-        return []
+    docs = list_meeting_source_docs(meeting_id)
     return sorted(
-        [path for path in docs_root.glob("*/source/*.pdf") if path.is_file()],
+        [Path(str(item.get("pdf_path", ""))) for item in docs if str(item.get("pdf_path", "")).strip()],
         key=lambda path: str(path).lower(),
     )
 
 
+def list_meeting_source_docs(meeting_id: str) -> list[dict[str, Any]]:
+    docs_root = get_meeting_dir(meeting_id) / "docs"
+    if not docs_root.exists() or not docs_root.is_dir():
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for doc_dir in sorted(docs_root.iterdir(), key=lambda p: p.name):
+        if not doc_dir.is_dir():
+            continue
+        metadata = safe_read_json(doc_dir / "metadata" / "document_intake.json") or {}
+        source_dir = doc_dir / "source"
+        source_files = sorted([path for path in source_dir.glob("*") if path.is_file()]) if source_dir.exists() else []
+        source_file = source_files[0] if source_files else None
+        pdf_path = None
+        for candidate in source_files:
+            if candidate.suffix.lower() == ".pdf":
+                pdf_path = candidate
+                break
+
+        rows.append(
+            {
+                "doc_id": str(metadata.get("doc_id", doc_dir.name)).strip(),
+                "document_role": str(metadata.get("document_role", "")).strip(),
+                "source_file_name": str(metadata.get("source_file_name", "")).strip(),
+                "source_extension": str(metadata.get("source_extension", "")).strip(),
+                "source_path": str(source_file) if source_file else "",
+                "pdf_path": str(pdf_path) if pdf_path else "",
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        )
+    return rows
+
+
 def find_report_pdf(meeting_id: str) -> Path | None:
-    # Phase 10.1 truth: report PDF generation contract is not implemented.
-    # Keep explicit None to avoid implying report artifacts exist.
-    _ = meeting_id
+    path = get_meeting_dir(meeting_id) / "report" / "report.pdf"
+    if path.exists() and path.is_file():
+        return path
     return None
 
 
@@ -105,4 +143,3 @@ def list_meetings() -> list[dict[str, Any]]:
         reverse=True,
     )
     return rows
-
