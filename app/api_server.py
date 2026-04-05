@@ -4,13 +4,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.config import config
 from app.services.audio import AudioIntakeService
 from app.services.calendar import approve, load_candidate_set, reject
 from app.services.calendar.sync_engine import process_calendar_sync
+from app.services.email import send_pdf_email
+from app.services.meetings import archive_meeting, get_meeting_detail, is_valid_meeting_id, list_recent_meetings, resolve_report_pdf
 from app.services.pipeline.orchestrator import run_full_pipeline
 
 app = FastAPI(title="CoE Decision Intelligence Upload API")
@@ -148,6 +150,68 @@ async def upload_audio(
                 temp_path.unlink()
             except Exception:
                 pass
+
+
+@app.get("/api/meetings/recent")
+async def meetings_recent(limit: int = Query(default=5, ge=1, le=50)) -> object:
+    try:
+        items = list_recent_meetings(limit=limit)
+    except Exception as exc:
+        return _error(500, "RECENT_MEETINGS_LOAD_FAILED", f"Failed to load recent meetings: {exc}")
+    return {"items": items, "limit": int(limit)}
+
+
+@app.get("/api/meetings/{meeting_id}")
+async def meeting_detail(meeting_id: str) -> object:
+    meeting_key = str(meeting_id).strip()
+    if not is_valid_meeting_id(meeting_key):
+        return _error(400, "INVALID_MEETING_ID", "meeting_id must match pattern MTG-* and contain no path separators.")
+    if not _meeting_exists(meeting_key):
+        return _error(404, "MEETING_NOT_FOUND", f"Meeting not found: {meeting_key}")
+    try:
+        payload = get_meeting_detail(meeting_key)
+    except FileNotFoundError:
+        return _error(404, "MEETING_NOT_FOUND", f"Meeting not found: {meeting_key}")
+    except Exception as exc:
+        return _error(500, "MEETING_DETAIL_LOAD_FAILED", f"Failed to load meeting detail: {exc}")
+    return payload
+
+
+@app.delete("/api/meetings/{meeting_id}")
+async def meeting_delete(meeting_id: str) -> object:
+    meeting_key = str(meeting_id).strip()
+    if not is_valid_meeting_id(meeting_key):
+        return _error(400, "INVALID_MEETING_ID", "meeting_id must match pattern MTG-* and contain no path separators.")
+    try:
+        result = archive_meeting(meeting_key)
+    except ValueError:
+        return _error(400, "INVALID_MEETING_ID", "meeting_id is invalid.")
+    except FileNotFoundError:
+        return _error(404, "MEETING_NOT_FOUND", f"Meeting not found: {meeting_key}")
+    except Exception as exc:
+        return _error(500, "MEETING_DELETE_FAILED", f"Failed to archive meeting: {exc}")
+    return result
+
+
+@app.post("/api/meetings/{meeting_id}/forward-pdf")
+async def forward_meeting_pdf(meeting_id: str) -> object:
+    meeting_key = str(meeting_id).strip()
+    if not is_valid_meeting_id(meeting_key):
+        return _error(400, "INVALID_MEETING_ID", "meeting_id must match pattern MTG-* and contain no path separators.")
+    if not _meeting_exists(meeting_key):
+        return _error(404, "MEETING_NOT_FOUND", f"Meeting not found: {meeting_key}")
+
+    pdf_path = resolve_report_pdf(meeting_key)
+    if pdf_path is None:
+        return _error(404, "PDF_NOT_FOUND", f"Report PDF not found for meeting: {meeting_key}")
+
+    try:
+        result = send_pdf_email(meeting_key, pdf_path)
+    except FileNotFoundError:
+        return _error(404, "PDF_NOT_FOUND", f"Report PDF not found for meeting: {meeting_key}")
+    except Exception as exc:
+        return _error(500, "EMAIL_SEND_FAILED", f"Failed to forward report PDF: {exc}")
+    return result
 
 
 @app.get("/api/inbox/pending")

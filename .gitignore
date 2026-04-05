@@ -6,4 +6,7 @@ data/
 *.m4a
 google_calendar_client_secret.json
 google_calendar_token.json
+google_gmail_token.json
+google_gmail_client_secret.json
+client_secret_*.json
 data/processed/*/calendar/calendar_sync_log.json
