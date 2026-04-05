@@ -13,12 +13,21 @@ def render_status_badge(label: str, status: str) -> None:
     if normalized == "completed":
         bg = "#0f5132"
         fg = "#d1e7dd"
-    elif normalized == "unknown":
-        bg = "#664d03"
-        fg = "#fff3cd"
-    else:
+    elif normalized in {"blocked", "failed"}:
         bg = "#842029"
         fg = "#f8d7da"
+    elif normalized == "pending":
+        bg = "#664d03"
+        fg = "#fff3cd"
+    elif normalized == "unknown":
+        bg = "#374151"
+        fg = "#e5e7eb"
+    elif normalized == "missing":
+        bg = "#7f1d1d"
+        fg = "#fee2e2"
+    else:
+        bg = "#4b5563"
+        fg = "#f3f4f6"
 
     st.markdown(
         (
@@ -135,4 +144,3 @@ def render_pdf_panel(file_path: Path, title: str) -> None:
         "</script>"
     )
     st.components.v1.html(html, height=880, scrolling=False)
-

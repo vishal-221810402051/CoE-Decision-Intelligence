@@ -13,6 +13,7 @@ from app.ui.components import (
     is_valid_pdf,
     render_json_panel,
     render_pdf_panel,
+    render_status_badge,
     render_status_strip,
     render_text_panel,
 )
@@ -81,7 +82,12 @@ def main() -> None:
     source_docs = list_meeting_source_docs(meeting_id)
 
     st.divider()
-    st.subheader("Processing Mode")
+    control_col, action_col = st.columns([3, 1])
+    with control_col:
+        st.subheader("Processing Mode")
+    with action_col:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+
     mode_state = get_processing_mode_state(meeting_id)
     _render_mode_chip(mode_state.get("processing_mode", "transcript_only"))
     mode_options = ["transcript_only", "transcript_plus_docs"]
@@ -135,18 +141,20 @@ def main() -> None:
         else:
             st.error(str(save_result.get("message", "Failed to save processing mode.")))
 
-    if st.button("Generate Report", key=f"generate_report_{meeting_id}"):
-        generation_result = generate_meeting_report(meeting_id)
-        if generation_result.get("ok"):
-            message = str(generation_result.get("message", "Report generation completed."))
-            lowered = message.lower()
-            if "failed" in lowered or "unavailable" in lowered:
-                st.warning(message)
+    _, action_right = st.columns([3, 2])
+    with action_right:
+        if st.button("Generate Report", key=f"generate_report_{meeting_id}", use_container_width=True):
+            generation_result = generate_meeting_report(meeting_id)
+            if generation_result.get("ok"):
+                message = str(generation_result.get("message", "Report generated successfully."))
+                lowered = message.lower()
+                if "failed" in lowered or "unavailable" in lowered:
+                    st.warning(message)
+                else:
+                    st.success(message)
             else:
-                st.success(message)
-        else:
-            st.error(str(generation_result.get("message", "Report generation failed.")))
-        st.rerun()
+                st.error(str(generation_result.get("message", "Report generation failed.")))
+            st.rerun()
 
     tabs = st.tabs(
         [
@@ -197,12 +205,7 @@ def main() -> None:
             meta_mode = str(report_metadata.get("processing_mode", mode_state.get("processing_mode", "transcript_only"))).strip()
             _render_mode_chip(meta_mode)
             report_status = str(report_metadata.get("status", "")).strip()
-            if report_status == "completed":
-                st.success("Report status: completed")
-            elif report_status == "blocked":
-                st.warning("Report status: blocked")
-            elif report_status:
-                st.error(f"Report status: {report_status}")
+            render_status_badge("report", report_status or "unknown")
 
             report_version = str(report_metadata.get("report_version", "")).strip()
             generated_at = str(report_metadata.get("generated_at", "")).strip()
@@ -242,15 +245,15 @@ def main() -> None:
             if isinstance(report_metadata, dict) and str(report_metadata.get("status", "")).strip() == "completed":
                 pdf_status = str(report_metadata.get("pdf_status", "")).strip().lower()
                 if pdf_status in {"failed", "unavailable"}:
-                    st.warning("PDF generation failed, HTML available.")
+                    st.warning("PDF generation failed, HTML version is available.")
                 else:
-                    st.info("Report generated (HTML payload available), but no PDF was produced in this environment.")
+                    st.info("Report generated (HTML available), but no PDF was produced in this environment.")
             else:
-                st.info("Report not generated yet.")
+                st.info("No report has been generated for this meeting yet.")
         elif report_pdf.exists():
             render_pdf_panel(report_pdf, "Report PDF Preview")
         else:
-            st.info("Report not generated yet.")
+            st.info("No report has been generated for this meeting yet.")
 
         st.divider()
         st.subheader("Source Document PDFs")
@@ -273,7 +276,7 @@ def main() -> None:
                     st.write(f"- `{path.relative_to(paths['meeting_dir'])}` (Invalid PDF file)")
 
             if not valid_pdfs and invalid_pdfs:
-                st.info("No PDF available for this meeting yet.")
+                st.info("No valid source document PDF is available for preview for this meeting yet.")
 
     with tabs[6]:
         st.subheader("Metadata")

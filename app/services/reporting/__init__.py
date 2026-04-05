@@ -957,9 +957,161 @@ def build_report_payload(meeting_id: str, mode: str) -> dict[str, Any]:
     }
 
 
-def _render_dict_table(rows: list[dict[str, Any]]) -> str:
+def _display_mode_label(mode: Any) -> str:
+    normalized = _clean_text(mode).lower()
+    if normalized == "transcript_only":
+        return "Transcript Only"
+    if normalized in {"transcript_plus_docs", "transcript_and_docs"}:
+        return "Transcript + Source Documents"
+    return _clean_text(mode) or "Unknown"
+
+
+def _display_empty_message(kind: str) -> str:
+    mapping = {
+        "risks": "No material risks were identified from available signals.",
+        "actions": "No concrete actions were identified from available signals.",
+        "timeline": "No timeline signals were identified from available signals.",
+        "follow_ups": "No open questions were identified for the next meeting.",
+        "doc_validation": "No source-document alignment was run (Transcript-Only basis).",
+        "report": "No report has been generated for this meeting yet.",
+    }
+    return mapping.get(kind, "No data available.")
+
+
+def _truncate_presentation_text(text: Any, *, limit: int = 160) -> str:
+    cleaned = _clean_text(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit].rstrip()}..."
+
+
+def _to_dict_rows(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in _to_list(value):
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _build_executive_brief(sections: dict[str, Any]) -> list[str]:
+    executive_summary = [item for item in _to_list(sections.get("executive_summary")) if _clean_text(item)]
+    decisions = _to_dict_rows(sections.get("decisions"))
+    risks = _to_dict_rows(sections.get("risks"))
+    actions = _to_dict_rows(sections.get("actions"))
+    follow_ups = _to_dict_rows(sections.get("follow_ups"))
+
+    decided_text = _clean_text(decisions[0].get("decision", "")) if decisions else ""
+    risk_text = _clean_text(risks[0].get("risk", "")) if risks else ""
+    next_step = _clean_text(actions[0].get("action", "")) if actions else ""
+    if not next_step and follow_ups:
+        next_step = _clean_text(follow_ups[0].get("question", ""))
+
+    if not decided_text and executive_summary:
+        decided_text = executive_summary[0]
+    if not risk_text and len(executive_summary) > 1:
+        risk_text = executive_summary[1]
+    if not next_step and len(executive_summary) > 2:
+        next_step = executive_summary[2]
+
+    if not decided_text:
+        decided_text = "No explicit decision signal was captured from the available artifacts."
+    if not risk_text:
+        risk_text = "No material risk signal was captured from the available artifacts."
+    if not next_step:
+        next_step = "No explicit next-step signal was captured from the available artifacts."
+
+    return [
+        f"What was decided: {_truncate_presentation_text(decided_text, limit=180)}",
+        f"What is at risk: {_truncate_presentation_text(risk_text, limit=180)}",
+        f"What must happen next: {_truncate_presentation_text(next_step, limit=180)}",
+    ]
+
+
+def _presentation_decisions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "Decision": _truncate_presentation_text(row.get("decision", ""), limit=180),
+            "Owner": _clean_text(row.get("owner", "")),
+            "Confidence": _clean_text(row.get("confidence", "")),
+            "Evidence Count": _clean_text(row.get("evidence_count", "")),
+        }
+        for row in rows
+    ]
+
+
+def _presentation_risks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "Risk": _truncate_presentation_text(row.get("risk", ""), limit=180),
+            "Impact": _clean_text(row.get("severity", "")),
+            "Confidence": _clean_text(row.get("confidence", "")),
+        }
+        for row in rows
+    ]
+
+
+def _presentation_actions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "Action": _truncate_presentation_text(row.get("action", ""), limit=180),
+            "Owner": _clean_text(row.get("owner", "")),
+            "Deadline": _clean_text(row.get("due_hint", "")),
+            "Status": _clean_text(row.get("status", "")),
+        }
+        for row in rows
+    ]
+
+
+def _timeline_date_display(signal: str, signal_type: str) -> str:
+    normalized_signal = _clean_text(signal)
+    lower_signal = normalized_signal.lower()
+    patterns = [
+        r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?\b",
+        r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b(?:\s+after\s+\d{1,2}(?::\d{2})?)?",
+        r"\b(?:first|second|third|fourth)\s+(?:week|month)\s+of\s+[a-z]+\b",
+        r"\bend of [a-z]+\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lower_signal, flags=re.IGNORECASE)
+        if match:
+            return _clean_text(match.group(0)).title()
+    return _clean_text(signal_type).replace("_", " ").title()
+
+
+def _presentation_timeline(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        event = _truncate_presentation_text(row.get("signal", ""), limit=170)
+        date_value = _timeline_date_display(_clean_text(row.get("signal", "")), _clean_text(row.get("type", "")))
+        confidence = _clean_text(row.get("confidence", ""))
+        key = _dedupe_key(event, date_value, confidence)
+        if key and key not in deduped:
+            deduped[key] = {
+                "Event": event,
+                "Date": date_value,
+                "Confidence": confidence,
+            }
+    return list(deduped.values())
+
+
+def _presentation_followups(rows: list[dict[str, Any]]) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        question = _truncate_presentation_text(row.get("question", ""), limit=180)
+        if not question:
+            continue
+        key = question.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(question)
+    return items
+
+
+def _render_dict_table(rows: list[dict[str, Any]], empty_message: str) -> str:
     if not rows:
-        return "<p>None</p>"
+        return f"<p>{escape(empty_message)}</p>"
     headers = list(rows[0].keys())
     header_html = "".join(f"<th>{escape(str(item))}</th>" for item in headers)
     body_rows: list[str] = []
@@ -967,17 +1119,18 @@ def _render_dict_table(rows: list[dict[str, Any]]) -> str:
         cells = "".join(f"<td>{escape(str(row.get(item, '')))}</td>" for item in headers)
         body_rows.append(f"<tr>{cells}</tr>")
     return (
-        "<table style='width:100%;border-collapse:collapse;' border='1' cellpadding='6'>"
+        "<table style='width:100%;border-collapse:collapse;margin-top:8px;' border='1' cellpadding='6'>"
         f"<thead><tr>{header_html}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table>"
     )
 
 
-def _render_bullets(items: list[str]) -> str:
-    if not items:
-        return "<li>None</li>"
-    return "".join(f"<li>{escape(_clean_text(item))}</li>" for item in items if _clean_text(item))
+def _render_bullets(items: list[str], empty_message: str) -> str:
+    valid_items = [item for item in items if _clean_text(item)]
+    if not valid_items:
+        return f"<li>{escape(empty_message)}</li>"
+    return "".join(f"<li>{escape(_clean_text(item))}</li>" for item in valid_items)
 
 
 def generate_html_report(payload: dict[str, Any]) -> str:
@@ -985,18 +1138,45 @@ def generate_html_report(payload: dict[str, Any]) -> str:
     if not isinstance(sections, dict):
         sections = {}
 
-    decisions = sections.get("decisions", [])
-    risks = sections.get("risks", [])
-    actions = sections.get("actions", [])
-    timeline = sections.get("timeline", [])
-    notes = sections.get("notes", [])
-    executive_summary = sections.get("executive_summary", [])
+    decisions = _to_dict_rows(sections.get("decisions"))
+    risks = _to_dict_rows(sections.get("risks"))
+    actions = _to_dict_rows(sections.get("actions"))
+    follow_ups = _to_dict_rows(sections.get("follow_ups"))
+    timeline = _to_dict_rows(sections.get("timeline"))
+    notes = [item for item in _to_list(sections.get("notes")) if _clean_text(item)]
+    governance = sections.get("governance", {})
+    if not isinstance(governance, dict):
+        governance = {}
+    operational_summary = sections.get("operational_summary", {})
+    if not isinstance(operational_summary, dict):
+        operational_summary = {}
     doc_validation = sections.get("doc_validation")
+    executive_brief = _build_executive_brief(sections)
+
+    decision_rows = _presentation_decisions(decisions)
+    risk_rows = _presentation_risks(risks)
+    action_rows = _presentation_actions(actions)
+    timeline_rows = _presentation_timeline(timeline)
+    follow_up_items = _presentation_followups(follow_ups)
+    governance_rows = [
+        {"Field": "Authority Clarity", "Value": _clean_text(governance.get("authority_clarity", "unknown"))},
+        {"Field": "Execution Clarity", "Value": _clean_text(governance.get("execution_clarity", "unknown"))},
+        {"Field": "Primary Executor", "Value": _clean_text(governance.get("primary_executor", "")) or "Not specified"},
+        {"Field": "Missing Owners", "Value": _clean_text(governance.get("missing_owners_count", 0))},
+    ]
+    governance_gap_rows = [{"Gap": _clean_text(item)} for item in _to_list(governance.get("key_gaps")) if _clean_text(item)]
+    operational_rows = [
+        {"Metric": "Blocked Decisions", "Value": _clean_text(operational_summary.get("blocked_count", 0))},
+        {"Metric": "Open Dependencies", "Value": _clean_text(operational_summary.get("open_dependencies_count", 0))},
+    ]
+    operational_blockers = [_clean_text(item) for item in _to_list(operational_summary.get("high_blockers")) if _clean_text(item)]
 
     title = f"Meeting Report - {payload.get('meeting_id', '')}"
-    mode = _clean_text(payload.get("processing_mode", ""))
+    mode = _display_mode_label(payload.get("processing_mode", ""))
+    report_version = _clean_text(payload.get("header", {}).get("report_version") if isinstance(payload.get("header"), dict) else "")
+    source_docs_used = [item for item in _to_list(payload.get("source_docs_used")) if _clean_text(item)]
 
-    doc_validation_html = "<p>Not applicable for transcript-only mode.</p>"
+    doc_validation_html = f"<p>{escape(_display_empty_message('doc_validation'))}</p>"
     if isinstance(doc_validation, dict):
         summary = doc_validation.get("summary", {}) if isinstance(doc_validation.get("summary"), dict) else {}
         details = doc_validation.get("details", []) if isinstance(doc_validation.get("details"), list) else []
@@ -1006,32 +1186,59 @@ def generate_html_report(payload: dict[str, Any]) -> str:
             f"Not Found: {escape(str(summary.get('not_found', 0)))} | "
             f"Unclear: {escape(str(summary.get('unclear', 0)))}</p>"
             "<h3>Details</h3>"
-            f"{_render_dict_table(details if details and isinstance(details[0], dict) else [])}"
+            f"{_render_dict_table(details if details and isinstance(details[0], dict) else [], _display_empty_message('doc_validation'))}"
         )
 
     return (
         "<!doctype html>"
         "<html><head><meta charset='utf-8'><title>"
         f"{escape(title)}"
-        "</title></head><body style='font-family:Arial,sans-serif;margin:24px;color:#1f2937;'>"
+        "</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;margin:24px;color:#111827;line-height:1.45;}"
+        "h1{margin-bottom:6px;}"
+        "h2{font-size:22px;border-bottom:1px solid #d1d5db;padding-bottom:6px;margin-top:28px;}"
+        "h3{font-size:17px;margin-top:16px;margin-bottom:6px;}"
+        ".meta{color:#374151;margin:2px 0;}"
+        ".brief{background:#f8fafc;border:1px solid #e5e7eb;border-left:4px solid #2563eb;border-radius:8px;padding:12px 14px;margin-top:10px;}"
+        ".section{margin-top:14px;}"
+        "table th{background:#f3f4f6;text-align:left;}"
+        "</style></head>"
+        "<body>"
         f"<h1>{escape(title)}</h1>"
-        f"<p><strong>Generated At:</strong> {escape(str(payload.get('generated_at', '')))}</p>"
-        f"<p><strong>Processing Mode:</strong> {escape(mode)}</p>"
+        f"<p class='meta'><strong>Generated At:</strong> {escape(str(payload.get('generated_at', '')))}</p>"
+        f"<p class='meta'><strong>Report Basis:</strong> {escape(mode)}</p>"
+        f"<p class='meta'><strong>Report Version:</strong> {escape(report_version or 'v1')}</p>"
         "<hr/>"
-        "<h2>Executive Summary</h2>"
-        f"<ul>{_render_bullets(executive_summary if isinstance(executive_summary, list) else [])}</ul>"
-        "<h2>Decisions</h2>"
-        f"{_render_dict_table(decisions if decisions and isinstance(decisions[0], dict) else [])}"
-        "<h2>Risks</h2>"
-        f"{_render_dict_table(risks if risks and isinstance(risks[0], dict) else [])}"
-        "<h2>Actions</h2>"
-        f"{_render_dict_table(actions if actions and isinstance(actions[0], dict) else [])}"
-        "<h2>Timeline</h2>"
-        f"{_render_dict_table(timeline if timeline and isinstance(timeline[0], dict) else [])}"
-        "<h2>Notes</h2>"
-        f"<ul>{_render_bullets(notes if isinstance(notes, list) else [])}</ul>"
-        "<h2>Source Document Validation</h2>"
+        "<h2>Executive Brief</h2>"
+        "<div class='brief'>"
+        f"<ul>{_render_bullets(executive_brief, 'No executive brief available.')}</ul>"
+        "</div>"
+        "<h2>Decision Snapshot</h2>"
+        f"{_render_dict_table(decision_rows, 'No decision records available from current artifacts.')}"
+        "<h2>Governance &amp; Ownership</h2>"
+        f"{_render_dict_table(governance_rows, 'No governance signals were identified.')}"
+        "<h3>Key Gaps</h3>"
+        f"{_render_dict_table(governance_gap_rows, 'No governance gaps were identified from available signals.')}"
+        "<h2>Top Risks</h2>"
+        f"{_render_dict_table(risk_rows, _display_empty_message('risks'))}"
+        "<h2>Action Register</h2>"
+        f"{_render_dict_table(action_rows, _display_empty_message('actions'))}"
+        "<h2>Open Questions for Next Meeting</h2>"
+        f"<ul>{_render_bullets(follow_up_items, _display_empty_message('follow_ups'))}</ul>"
+        "<h2>Timeline &amp; Deadlines</h2>"
+        f"{_render_dict_table(timeline_rows, _display_empty_message('timeline'))}"
+        "<h2>Execution Status Snapshot</h2>"
+        f"{_render_dict_table(operational_rows, 'No execution status metrics were identified from available signals.')}"
+        "<h3>High Blockers</h3>"
+        f"<ul>{_render_bullets(operational_blockers, 'No high blockers were identified from available signals.')}</ul>"
+        "<h2>Appendix</h2>"
+        "<h3>Source-Document Alignment</h3>"
         f"{doc_validation_html}"
+        "<h3>Notes</h3>"
+        f"<ul>{_render_bullets(notes, 'No additional notes were recorded.')}</ul>"
+        "<h3>Provenance</h3>"
+        f"<p>{escape('Source docs used: ' + (', '.join(source_docs_used) if source_docs_used else 'None'))}</p>"
         "</body></html>"
     )
 
@@ -1044,13 +1251,17 @@ def _truncate_pdf_cell_text(text: str, max_length: int = 300) -> str:
 
 
 def _pdf_column_widths(headers: list[str], usable_width: float) -> list[float]:
-    key = tuple(headers)
+    key = tuple(_clean_text(item).lower() for item in headers)
     ratio_map: dict[tuple[str, ...], list[float]] = {
         ("decision", "owner", "confidence", "evidence_count"): [0.50, 0.20, 0.15, 0.15],
-        ("risk", "severity", "confidence", "owner", "mitigation"): [0.45, 0.15, 0.10, 0.15, 0.15],
-        ("action", "owner", "status", "due_hint"): [0.50, 0.20, 0.15, 0.15],
-        ("signal", "type", "confidence"): [0.50, 0.25, 0.25],
+        ("decision", "owner", "confidence", "evidence count"): [0.50, 0.20, 0.15, 0.15],
+        ("risk", "impact", "confidence"): [0.60, 0.20, 0.20],
+        ("action", "owner", "deadline", "status"): [0.50, 0.20, 0.15, 0.15],
+        ("event", "date", "confidence"): [0.50, 0.25, 0.25],
         ("doc_id", "status", "overlap_score", "matched_entities", "matched_phrases"): [0.20, 0.10, 0.10, 0.30, 0.30],
+        ("field", "value"): [0.34, 0.66],
+        ("metric", "value"): [0.45, 0.55],
+        ("gap",): [1.0],
     }
 
     ratios = ratio_map.get(key)
@@ -1119,30 +1330,78 @@ def generate_pdf_report(payload: dict[str, Any], output_path: Path) -> dict[str,
 
         sections = payload.get("sections", {}) if isinstance(payload.get("sections"), dict) else {}
         title = f"Meeting Report - {_clean_text(payload.get('meeting_id', ''))}"
+        report_basis = _display_mode_label(payload.get("processing_mode", ""))
+        report_version = _clean_text(
+            payload.get("header", {}).get("report_version")
+            if isinstance(payload.get("header"), dict)
+            else ""
+        ) or "v1"
+
+        decisions = _to_dict_rows(sections.get("decisions"))
+        risks = _to_dict_rows(sections.get("risks"))
+        actions = _to_dict_rows(sections.get("actions"))
+        follow_ups = _to_dict_rows(sections.get("follow_ups"))
+        timeline = _to_dict_rows(sections.get("timeline"))
+        governance = sections.get("governance", {})
+        if not isinstance(governance, dict):
+            governance = {}
+        operational_summary = sections.get("operational_summary", {})
+        if not isinstance(operational_summary, dict):
+            operational_summary = {}
+        notes = [item for item in _to_list(sections.get("notes")) if _clean_text(item)]
+        source_docs_used = [item for item in _to_list(payload.get("source_docs_used")) if _clean_text(item)]
+        doc_validation = sections.get("doc_validation")
+
+        decision_rows = _presentation_decisions(decisions)
+        risk_rows = _presentation_risks(risks)
+        action_rows = _presentation_actions(actions)
+        timeline_rows = _presentation_timeline(timeline)
+        follow_up_items = _presentation_followups(follow_ups)
+        executive_brief = _build_executive_brief(sections)
+        governance_rows = [
+            {"Field": "Authority Clarity", "Value": _clean_text(governance.get("authority_clarity", "unknown"))},
+            {"Field": "Execution Clarity", "Value": _clean_text(governance.get("execution_clarity", "unknown"))},
+            {"Field": "Primary Executor", "Value": _clean_text(governance.get("primary_executor", "")) or "Not specified"},
+            {"Field": "Missing Owners", "Value": _clean_text(governance.get("missing_owners_count", 0))},
+        ]
+        governance_gap_rows = [{"Gap": _clean_text(item)} for item in _to_list(governance.get("key_gaps")) if _clean_text(item)]
+        operational_rows = [
+            {"Metric": "Blocked Decisions", "Value": _clean_text(operational_summary.get("blocked_count", 0))},
+            {"Metric": "Open Dependencies", "Value": _clean_text(operational_summary.get("open_dependencies_count", 0))},
+        ]
+        operational_blockers = [_clean_text(item) for item in _to_list(operational_summary.get("high_blockers")) if _clean_text(item)]
 
         story.append(Paragraph(title, styles["Title"]))
         story.append(Spacer(1, 8))
         story.append(Paragraph(f"Generated At: {_clean_text(payload.get('generated_at', ''))}", styles["Normal"]))
-        story.append(Paragraph(f"Processing Mode: {_clean_text(payload.get('processing_mode', ''))}", styles["Normal"]))
-        story.append(Spacer(1, 12))
-
-        story.append(Paragraph("Executive Summary", styles["Heading2"]))
-        executive_bullets = sections.get("executive_summary", []) if isinstance(sections.get("executive_summary"), list) else []
-        if executive_bullets:
-            bullet_items = [ListItem(Paragraph(_clean_text(item), styles["Normal"])) for item in executive_bullets if _clean_text(item)]
-            story.append(ListFlowable(bullet_items, bulletType="bullet"))
-        else:
-            story.append(Paragraph("No executive summary available.", styles["Normal"]))
+        story.append(Paragraph(f"Report Basis: {report_basis}", styles["Normal"]))
+        story.append(Paragraph(f"Report Version: {report_version}", styles["Normal"]))
         story.append(Spacer(1, 12))
 
         def make_cell_paragraph(text: str) -> Any:
             return Paragraph(_truncate_pdf_cell_text(text), styles["Normal"])
 
-        def add_table_section(title_text: str, rows: list[dict[str, Any]], headers: list[str]) -> None:
+        def add_divider() -> None:
+            divider = Table(
+                [[""]],
+                colWidths=[usable_width],
+                hAlign="LEFT",
+            )
+            divider.setStyle(
+                TableStyle(
+                    [
+                        ("LINEABOVE", (0, 0), (-1, -1), 0.6, colors.HexColor("#d1d5db")),
+                    ]
+                )
+            )
+            story.append(divider)
+            story.append(Spacer(1, 8))
+
+        def add_table_section(title_text: str, rows: list[dict[str, Any]], headers: list[str], empty_message: str) -> None:
             story.append(Paragraph(title_text, styles["Heading2"]))
             if not rows:
-                story.append(Paragraph("None", styles["Normal"]))
-                story.append(Spacer(1, 8))
+                story.append(Paragraph(empty_message, styles["Normal"]))
+                story.append(Spacer(1, 10))
                 return
             data = _pdf_table_data(rows, headers, make_cell_paragraph)
             col_widths = _pdf_column_widths(headers, usable_width)
@@ -1171,28 +1430,84 @@ def generate_pdf_report(payload: dict[str, Any], output_path: Path) -> dict[str,
             story.append(table)
             story.append(Spacer(1, 10))
 
-        decisions = sections.get("decisions", []) if isinstance(sections.get("decisions"), list) else []
-        add_table_section("Decisions", decisions, ["decision", "owner", "confidence", "evidence_count"])
-
-        risks = sections.get("risks", []) if isinstance(sections.get("risks"), list) else []
-        add_table_section("Risks", risks, ["risk", "severity", "confidence", "owner", "mitigation"])
-
-        actions = sections.get("actions", []) if isinstance(sections.get("actions"), list) else []
-        add_table_section("Actions", actions, ["action", "owner", "status", "due_hint"])
-
-        timeline = sections.get("timeline", []) if isinstance(sections.get("timeline"), list) else []
-        add_table_section("Timeline", timeline, ["signal", "type", "confidence"])
-
-        story.append(Paragraph("Notes", styles["Heading2"]))
-        notes = sections.get("notes", []) if isinstance(sections.get("notes"), list) else []
-        for note in notes:
-            note_text = _clean_text(note)
-            if note_text:
-                story.append(Paragraph(f"- {note_text}", styles["Normal"]))
+        story.append(Paragraph("Executive Brief", styles["Heading2"]))
+        brief_items = [ListItem(Paragraph(_clean_text(item), styles["Normal"])) for item in executive_brief if _clean_text(item)]
+        story.append(ListFlowable(brief_items, bulletType="bullet"))
         story.append(Spacer(1, 10))
+        add_divider()
 
-        story.append(Paragraph("Source Document Validation", styles["Heading2"]))
-        doc_validation = sections.get("doc_validation")
+        add_table_section(
+            "Decision Snapshot",
+            decision_rows,
+            ["Decision", "Owner", "Confidence", "Evidence Count"],
+            "No decision records available from current artifacts.",
+        )
+        add_divider()
+
+        add_table_section(
+            "Governance & Ownership",
+            governance_rows,
+            ["Field", "Value"],
+            "No governance signals were identified.",
+        )
+        add_table_section(
+            "Governance Gaps",
+            governance_gap_rows,
+            ["Gap"],
+            "No governance gaps were identified from available signals.",
+        )
+        add_divider()
+
+        add_table_section(
+            "Top Risks",
+            risk_rows,
+            ["Risk", "Impact", "Confidence"],
+            _display_empty_message("risks"),
+        )
+        add_divider()
+
+        add_table_section(
+            "Action Register",
+            action_rows,
+            ["Action", "Owner", "Deadline", "Status"],
+            _display_empty_message("actions"),
+        )
+        add_divider()
+
+        story.append(Paragraph("Open Questions for Next Meeting", styles["Heading2"]))
+        if follow_up_items:
+            follow_items = [ListItem(Paragraph(_clean_text(item), styles["Normal"])) for item in follow_up_items if _clean_text(item)]
+            story.append(ListFlowable(follow_items, bulletType="bullet"))
+        else:
+            story.append(Paragraph(_display_empty_message("follow_ups"), styles["Normal"]))
+        story.append(Spacer(1, 10))
+        add_divider()
+
+        add_table_section(
+            "Timeline & Deadlines",
+            timeline_rows,
+            ["Event", "Date", "Confidence"],
+            _display_empty_message("timeline"),
+        )
+        add_divider()
+
+        add_table_section(
+            "Execution Status Snapshot",
+            operational_rows,
+            ["Metric", "Value"],
+            "No execution status metrics were identified from available signals.",
+        )
+        story.append(Paragraph("High Blockers", styles["Heading3"]))
+        if operational_blockers:
+            blocker_items = [ListItem(Paragraph(_clean_text(item), styles["Normal"])) for item in operational_blockers]
+            story.append(ListFlowable(blocker_items, bulletType="bullet"))
+        else:
+            story.append(Paragraph("No high blockers were identified from available signals.", styles["Normal"]))
+        story.append(Spacer(1, 10))
+        add_divider()
+
+        story.append(Paragraph("Appendix", styles["Heading2"]))
+        story.append(Paragraph("Source-Document Alignment", styles["Heading3"]))
         if isinstance(doc_validation, dict):
             summary = doc_validation.get("summary", {}) if isinstance(doc_validation.get("summary"), dict) else {}
             story.append(
@@ -1211,9 +1526,27 @@ def generate_pdf_report(payload: dict[str, Any], output_path: Path) -> dict[str,
                 "Validation Details",
                 details,
                 ["doc_id", "status", "overlap_score", "matched_entities", "matched_phrases"],
+                _display_empty_message("doc_validation"),
             )
         else:
-            story.append(Paragraph("Not applicable for transcript-only mode.", styles["Normal"]))
+            story.append(Paragraph(_display_empty_message("doc_validation"), styles["Normal"]))
+            story.append(Spacer(1, 10))
+
+        story.append(Paragraph("Notes", styles["Heading3"]))
+        if notes:
+            notes_items = [ListItem(Paragraph(_clean_text(item), styles["Normal"])) for item in notes if _clean_text(item)]
+            story.append(ListFlowable(notes_items, bulletType="bullet"))
+        else:
+            story.append(Paragraph("No additional notes were recorded.", styles["Normal"]))
+        story.append(Spacer(1, 8))
+
+        story.append(Paragraph("Provenance", styles["Heading3"]))
+        story.append(
+            Paragraph(
+                f"Source docs used: {', '.join(_clean_text(item) for item in source_docs_used) if source_docs_used else 'None'}",
+                styles["Normal"],
+            )
+        )
 
         doc.build(story)
         return {"ok": True, "reason": "generated", "error": None}

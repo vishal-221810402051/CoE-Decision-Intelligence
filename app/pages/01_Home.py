@@ -10,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.ui.repository import list_meetings
+from app.ui.components import render_status_badge
 from app.ui.status_model import compute_stage_status
 
 
@@ -80,11 +81,16 @@ def main() -> None:
         cols = st.columns([2.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.1])
         meeting_id = row["Meeting ID"]
         cols[0].write(meeting_id)
-        cols[1].write(row["Intake"])
-        cols[2].write(row["Transcription"])
-        cols[3].write(row["Intelligence"])
-        cols[4].write(row["Executive"])
-        cols[5].write(row["Decision"])
+        with cols[1]:
+            render_status_badge("intake", row["Intake"])
+        with cols[2]:
+            render_status_badge("transcription", row["Transcription"])
+        with cols[3]:
+            render_status_badge("intelligence", row["Intelligence"])
+        with cols[4]:
+            render_status_badge("executive", row["Executive"])
+        with cols[5]:
+            render_status_badge("decision", row["Decision"])
         if cols[6].button("Open", key=f"home_open_{meeting_id}"):
             _set_open_meeting(meeting_id)
 
