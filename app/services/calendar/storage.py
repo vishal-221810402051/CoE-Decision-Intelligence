@@ -20,6 +20,7 @@ CALENDAR_DIR_NAME = "calendar"
 CANDIDATES_FILE_NAME = "calendar_candidates.json"
 METADATA_FILE_NAME = "calendar_candidate_metadata.json"
 APPROVAL_LOG_FILE_NAME = "calendar_approval_log.jsonl"
+SYNC_LOG_FILE_NAME = "calendar_sync_log.json"
 
 
 def _calendar_dir(meeting_id: str) -> Path:
@@ -36,6 +37,10 @@ def _metadata_path(meeting_id: str) -> Path:
 
 def _approval_log_path(meeting_id: str) -> Path:
     return _calendar_dir(meeting_id) / APPROVAL_LOG_FILE_NAME
+
+
+def _sync_log_path(meeting_id: str) -> Path:
+    return _calendar_dir(meeting_id) / SYNC_LOG_FILE_NAME
 
 
 def _safe_read_json(path: Path) -> dict[str, Any]:
@@ -62,10 +67,38 @@ def load_candidates(meeting_id: str) -> list[CalendarCandidate]:
     return out
 
 
-def save_candidates(meeting_id: str, candidates: Iterable[CalendarCandidate]) -> Path:
+def _candidate_to_dict(candidate: CalendarCandidate | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(candidate, CalendarCandidate):
+        return candidate.to_dict()
+    if isinstance(candidate, dict):
+        return CalendarCandidate.from_dict(candidate).to_dict()
+    return {}
+
+
+def load_candidates_payload(meeting_id: str) -> dict[str, Any]:
+    payload = _safe_read_json(_candidates_path(meeting_id))
+    rows = payload.get("candidates", [])
+    if not isinstance(rows, list):
+        rows = []
+    normalized = [_candidate_to_dict(row) for row in rows if isinstance(row, dict)]
+    normalized.sort(
+        key=lambda row: (
+            str(row.get("display_date", "")).strip(),
+            str(row.get("type", "")).strip(),
+            str(row.get("candidate_id", "")).strip(),
+        )
+    )
+    return {
+        "meeting_id": str(meeting_id).strip(),
+        "candidates": normalized,
+    }
+
+
+def save_candidates(meeting_id: str, candidates: Iterable[CalendarCandidate | dict[str, Any]]) -> Path:
     cdir = _calendar_dir(meeting_id)
     cdir.mkdir(parents=True, exist_ok=True)
-    rows = [candidate.to_dict() for candidate in candidates]
+    rows = [_candidate_to_dict(candidate) for candidate in candidates]
+    rows = [row for row in rows if isinstance(row, dict) and row]
     rows.sort(
         key=lambda row: (
             str(row.get("display_date", "")).strip(),
@@ -98,10 +131,11 @@ def build_metadata(
     pending_count = sum(1 for row in candidates if row.approval_state == ApprovalState.PENDING.value)
     approved_count = sum(1 for row in candidates if row.approval_state == ApprovalState.APPROVED.value)
     rejected_count = sum(1 for row in candidates if row.approval_state == ApprovalState.REJECTED.value)
+    allowed_sync = {status.value for status in SyncStatus}
     validation_passed = all(
         bool(row.candidate_id)
-        and row.sync_status == SyncStatus.NOT_QUEUED.value
         and bool(row.temporal_item_id)
+        and str(row.sync_status).strip() in allowed_sync
         for row in candidates
     )
     metadata = CalendarCandidateMetadata(
@@ -150,10 +184,67 @@ def append_approval_log(meeting_id: str, log_entry: dict[str, Any]) -> Path:
     return path
 
 
-def calendar_paths(meeting_id: str) -> dict[str, str]:
+def load_sync_log(meeting_id: str) -> list[dict[str, Any]]:
+    path = _sync_log_path(meeting_id)
+    if not path.exists() or not path.is_file():
+        return []
+    payload = _safe_read_json(path)
+    rows = payload.get("items", [])
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            out.append(dict(row))
+    return out
+
+
+def save_sync_log(meeting_id: str, rows: list[dict[str, Any]]) -> Path:
+    cdir = _calendar_dir(meeting_id)
+    cdir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "meeting_id": str(meeting_id).strip(),
+        "items": [dict(row) for row in rows if isinstance(row, dict)],
+    }
+    path = _sync_log_path(meeting_id)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def update_candidate(meeting_id: str, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    payload = load_candidates_payload(meeting_id)
+    rows = payload.get("candidates", [])
+    cid = str(candidate_id).strip()
+    update_values = dict(updates) if isinstance(updates, dict) else {}
+
+    updated: dict[str, Any] | None = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("candidate_id", "")).strip() != cid:
+            continue
+        row.update(update_values)
+        updated = CalendarCandidate.from_dict(row).to_dict()
+        row.clear()
+        row.update(updated)
+        break
+
+    if updated is None:
+        raise ValueError(f"Candidate not found: {cid}")
+
+    save_candidates(meeting_id, rows)
+    return updated
+
+
+def calendar_paths(meeting_id: str) -> dict[str, Path]:
     return {
-        "calendar_dir": str(_calendar_dir(meeting_id)),
-        "candidates_path": str(_candidates_path(meeting_id)),
-        "metadata_path": str(_metadata_path(meeting_id)),
-        "approval_log_path": str(_approval_log_path(meeting_id)),
+        "base": _calendar_dir(meeting_id),
+        "calendar_dir": _calendar_dir(meeting_id),
+        "candidates": _candidates_path(meeting_id),
+        "metadata": _metadata_path(meeting_id),
+        "approval_log": _approval_log_path(meeting_id),
+        "sync_log": _sync_log_path(meeting_id),
+        "candidates_path": _candidates_path(meeting_id),
+        "metadata_path": _metadata_path(meeting_id),
+        "approval_log_path": _approval_log_path(meeting_id),
     }

@@ -91,7 +91,7 @@ def generate_candidates(meeting_id: str) -> dict[str, Any]:
         "generated_at": metadata.get("generated_at", now_ts),
         "candidates_path": str(candidates_path),
         "metadata_path": str(metadata_path),
-        "approval_log_path": paths["approval_log_path"],
+        "approval_log_path": str(paths["approval_log_path"]),
     }
 
 
@@ -152,5 +152,21 @@ def load_candidate_set(meeting_id: str) -> dict[str, Any]:
         "meeting_id": meeting_key,
         "candidates": candidates,
         "metadata": metadata,
-        "paths": paths,
+        "paths": {key: str(value) for key, value in paths.items()},
     }
+
+
+def sync_approved_candidates(meeting_id: str, calendar_id: str = "primary") -> dict[str, Any]:
+    from app.services.calendar.google_sync import sync_approved_candidates as _sync
+
+    return _sync(meeting_id=meeting_id, calendar_id=calendar_id)
+
+
+__all__ = [
+    "generate_candidates",
+    "approve",
+    "reject",
+    "reset_to_pending",
+    "load_candidate_set",
+    "sync_approved_candidates",
+]

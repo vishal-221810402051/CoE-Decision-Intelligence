@@ -25,6 +25,10 @@ class ApprovalState(str, Enum):
 
 class SyncStatus(str, Enum):
     NOT_QUEUED = "not_queued"
+    QUEUED = "queued"
+    SYNCED = "synced"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 @dataclass
@@ -63,6 +67,10 @@ class CalendarCandidate:
     display_date: str
     display_time: str
     display_reason: str
+    external_event_id: str = ""
+    external_calendar_id: str = ""
+    last_sync_at: str = ""
+    last_sync_error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -110,6 +118,10 @@ class CalendarCandidate:
             display_date=str(payload.get("display_date", "")).strip(),
             display_time=str(payload.get("display_time", "")).strip(),
             display_reason=str(payload.get("display_reason", "")).strip(),
+            external_event_id=str(payload.get("external_event_id", "")).strip(),
+            external_calendar_id=str(payload.get("external_calendar_id", "")).strip(),
+            last_sync_at=str(payload.get("last_sync_at", "")).strip(),
+            last_sync_error=str(payload.get("last_sync_error", "")).strip(),
         )
 
 
