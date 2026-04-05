@@ -1,4 +1,7 @@
 streamlit
+fastapi
+uvicorn
+python-multipart
 python-dotenv
 openai>=1.0.0
 pydub
