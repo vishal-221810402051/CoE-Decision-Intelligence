@@ -124,6 +124,7 @@ def build_metadata(
     candidates: list[CalendarCandidate],
     source_temporal_hash: str,
     generated_at: str | None = None,
+    suppressed_duplicates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     generated_ts = generated_at or now_iso()
     eligible_count = sum(1 for row in candidates if row.eligibility_status == EligibilityStatus.ELIGIBLE.value)
@@ -149,6 +150,7 @@ def build_metadata(
         rejected_count=rejected_count,
         blocked_count=blocked_count,
         validation_passed=validation_passed,
+        suppressed_duplicates=[dict(row) for row in (suppressed_duplicates or []) if isinstance(row, dict)],
     )
     return metadata.to_dict()
 

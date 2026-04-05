@@ -19,6 +19,7 @@ class Config:
     DB_PATH: Path = DATA_PATH / "db"
 
     ALLOWED_AUDIO_EXTENSIONS: set[str] = {".m4a", ".mp3", ".wav"}
+    DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
 
     FFMPEG_BINARY: str = os.getenv("FFMPEG_BINARY", "ffmpeg")
     NORMALIZED_DIR_NAME: str = "normalized"
@@ -55,6 +56,7 @@ class Config:
 
 
 config = Config()
+DEFAULT_TIMEZONE = config.DEFAULT_TIMEZONE
 
 TRANSCRIPT_DIR_NAME = config.TRANSCRIPT_DIR_NAME
 TRANSCRIPT_RAW_FILE_NAME = config.TRANSCRIPT_RAW_FILE_NAME

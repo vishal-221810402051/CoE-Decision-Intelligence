@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.calendar.schemas import ApprovalState, CalendarCandidate
+from app.services.calendar.schemas import ApprovalState, CalendarCandidate, SyncStatus
 from app.services.calendar.storage import (
     append_approval_log,
     build_metadata,
@@ -91,11 +91,15 @@ def approve_candidate(
     source_name = str(source or "dashboard_ui").strip()
     old_state = candidate.approval_state
     candidate.approval_state = ApprovalState.APPROVED.value
+    candidate.sync_status = SyncStatus.QUEUED.value
     candidate.approval_source = source_name
     candidate.approved_by = actor_name
     candidate.approved_at = now_ts
     candidate.rejected_by = ""
     candidate.rejected_at = ""
+    candidate.external_event_id = ""
+    candidate.external_calendar_id = ""
+    candidate.last_sync_error = ""
     candidate.approval_note = str(note or "").strip()
     candidate.updated_at = now_ts
 

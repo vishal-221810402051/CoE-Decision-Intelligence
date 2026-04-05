@@ -6,11 +6,34 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config import DEFAULT_TIMEZONE
 from app.services.calendar.schemas import ApprovalState, CalendarCandidate, SyncStatus
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _is_unknown_timezone(value: Any) -> bool:
+    token = str(value or "").strip().lower()
+    return token in {"", "unknown", "none", "null"}
+
+
+def resolve_timezone(candidate: dict[str, Any]) -> str:
+    if not isinstance(candidate, dict):
+        return DEFAULT_TIMEZONE
+
+    candidate_tz = candidate.get("timezone")
+    if not _is_unknown_timezone(candidate_tz):
+        return str(candidate_tz).strip()
+
+    normalized = candidate.get("normalized_time", {})
+    if isinstance(normalized, dict):
+        normalized_tz = normalized.get("timezone")
+        if not _is_unknown_timezone(normalized_tz):
+            return str(normalized_tz).strip()
+
+    return DEFAULT_TIMEZONE
 
 
 def _canonicalize(value: Any) -> Any:

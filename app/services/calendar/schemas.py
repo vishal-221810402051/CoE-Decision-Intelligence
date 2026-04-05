@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -67,6 +67,8 @@ class CalendarCandidate:
     display_date: str
     display_time: str
     display_reason: str
+    dedup_key: str = ""
+    canonical_candidate_id: str = ""
     external_event_id: str = ""
     external_calendar_id: str = ""
     last_sync_at: str = ""
@@ -118,6 +120,8 @@ class CalendarCandidate:
             display_date=str(payload.get("display_date", "")).strip(),
             display_time=str(payload.get("display_time", "")).strip(),
             display_reason=str(payload.get("display_reason", "")).strip(),
+            dedup_key=str(payload.get("dedup_key", "")).strip(),
+            canonical_candidate_id=str(payload.get("canonical_candidate_id", "")).strip(),
             external_event_id=str(payload.get("external_event_id", "")).strip(),
             external_calendar_id=str(payload.get("external_calendar_id", "")).strip(),
             last_sync_at=str(payload.get("last_sync_at", "")).strip(),
@@ -137,6 +141,7 @@ class CalendarCandidateMetadata:
     rejected_count: int
     blocked_count: int
     validation_passed: bool
+    suppressed_duplicates: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

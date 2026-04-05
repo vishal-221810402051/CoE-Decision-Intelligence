@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,17 @@ def _display_fields(normalized_time: dict[str, Any], temporal_type: str) -> tupl
     tod = _safe_text(normalized_time.get("time_of_day", ""))
     timezone = _safe_text(normalized_time.get("timezone", "unknown")) or "unknown"
 
+    if ntype == "exact_datetime":
+        date_part = nvalue
+        time_part = tod
+        if "t" in nvalue.lower():
+            split = re.split(r"[Tt]", nvalue, maxsplit=1)
+            if len(split) == 2:
+                date_part = _safe_text(split[0]) or nvalue
+                raw_time = _safe_text(split[1])
+                if raw_time:
+                    time_part = raw_time[:5] if len(raw_time) >= 5 else raw_time
+        return date_part, (time_part or "Time set"), "Exact date/time signal.", False, timezone
     if ntype == "exact_date":
         if tod:
             return nvalue, tod, "Exact date/time signal.", False, timezone

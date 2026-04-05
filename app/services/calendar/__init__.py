@@ -8,6 +8,7 @@ from app.services.calendar.approval_manager import (
     reset_candidate_to_pending,
 )
 from app.services.calendar.candidate_builder import build_calendar_candidates, load_temporal_payload
+from app.services.calendar.dedup import deduplicate_candidates
 from app.services.calendar.schemas import CalendarCandidate
 from app.services.calendar.storage import (
     append_approval_log,
@@ -19,6 +20,7 @@ from app.services.calendar.storage import (
     save_metadata,
 )
 from app.services.calendar.utils import compute_temporal_hash, now_iso, reconcile_candidate_with_previous
+from app.services.calendar.sync_engine import process_calendar_sync
 
 
 def _to_map(candidates: list[CalendarCandidate]) -> dict[str, CalendarCandidate]:
@@ -66,14 +68,17 @@ def generate_candidates(meeting_id: str) -> dict[str, Any]:
         )
     )
 
-    candidates_path = save_candidates(meeting_key, merged_candidates)
+    deduped_candidates, suppressed_duplicates = deduplicate_candidates(merged_candidates)
+
+    candidates_path = save_candidates(meeting_key, deduped_candidates)
     temporal_payload = load_temporal_payload(meeting_key)
     temporal_hash = compute_temporal_hash(temporal_payload)
     metadata = build_metadata(
         meeting_id=meeting_key,
-        candidates=merged_candidates,
+        candidates=deduped_candidates,
         source_temporal_hash=temporal_hash,
         generated_at=now_ts,
+        suppressed_duplicates=suppressed_duplicates,
     )
     metadata_path = save_metadata(meeting_key, metadata)
     paths = calendar_paths(meeting_key)
@@ -82,6 +87,7 @@ def generate_candidates(meeting_id: str) -> dict[str, Any]:
         "status": "completed",
         "meeting_id": meeting_key,
         "candidate_count": metadata.get("candidate_count", 0),
+        "suppressed_count": len(suppressed_duplicates),
         "eligible_count": metadata.get("eligible_count", 0),
         "pending_count": metadata.get("pending_count", 0),
         "approved_count": metadata.get("approved_count", 0),
@@ -169,4 +175,5 @@ __all__ = [
     "reset_to_pending",
     "load_candidate_set",
     "sync_approved_candidates",
+    "process_calendar_sync",
 ]

@@ -15,26 +15,52 @@ def main(meeting_id: str) -> None:
     payload = load_candidate_set(meeting_id)
     candidates = payload.get("candidates", [])
 
+    # --- Step 1: Try eligible + pending ---
     eligible_pending = [
-        c
-        for c in candidates
+        c for c in candidates
         if c.get("eligibility_status") == "eligible"
         and c.get("approval_state") == "pending"
     ]
 
-    if not eligible_pending:
-        raise RuntimeError("No eligible pending candidates found for sync test.")
+    selected_candidate = None
 
-    first = eligible_pending[0]
-    approve(
-        meeting_id,
-        first["candidate_id"],
-        actor="phase12_2_test",
-        source="dashboard_ui",
-        note="sync test approval",
-    )
+    if eligible_pending:
+        print("Found eligible pending candidate -> approving for sync test")
 
+        selected_candidate = eligible_pending[0]
+
+        approve(
+            meeting_id,
+            selected_candidate["candidate_id"],
+            actor="phase12_2_test",
+            source="dashboard_ui",
+            note="sync test approval",
+        )
+
+    else:
+        print("No eligible pending candidates -> falling back to approved unsynced")
+
+        eligible_approved_unsynced = [
+            c for c in candidates
+            if c.get("eligibility_status") == "eligible"
+            and c.get("approval_state") == "approved"
+            and c.get("sync_status") in {"not_queued", "failed"}
+            and not c.get("external_event_id")
+        ]
+
+        if not eligible_approved_unsynced:
+            raise RuntimeError(
+                "No eligible candidates available for sync (neither pending nor approved-unsynced)."
+            )
+
+        selected_candidate = eligible_approved_unsynced[0]
+
+    print(f"Selected candidate: {selected_candidate['candidate_id']}")
+
+    # --- Step 2: Run sync ---
     result = sync_approved_candidates(meeting_id)
+
+    print("\n=== SYNC RESULT ===")
     print(json.dumps(result, indent=2))
 
 

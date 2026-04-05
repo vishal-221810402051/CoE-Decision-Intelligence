@@ -11,11 +11,11 @@ from app.services.calendar.storage import (
     save_sync_log,
     update_candidate,
 )
+from app.services.calendar.utils import resolve_timezone
 
 
 DEFAULT_CALENDAR_ID = "primary"
 DEFAULT_EVENT_DURATION_MINUTES = 60
-DEFAULT_TIMEZONE = "Europe/Paris"
 
 
 def _utc_now_iso() -> str:
@@ -46,7 +46,7 @@ def _build_event_body(candidate: dict[str, Any]) -> dict[str, Any]:
         normalized = {}
     value = str(normalized.get("value", "")).strip()
     time_of_day = str(normalized.get("time_of_day", "")).strip()
-    tz = str(candidate.get("timezone", "")).strip() or DEFAULT_TIMEZONE
+    tz = resolve_timezone(candidate)
     all_day = bool(candidate.get("all_day", True))
 
     description_parts = [
@@ -128,6 +128,14 @@ def sync_approved_candidates(meeting_id: str, calendar_id: str = DEFAULT_CALENDA
         )
 
         try:
+            normalized = candidate.get("normalized_time", {})
+            normalized_value = ""
+            if isinstance(normalized, dict):
+                normalized_value = str(normalized.get("value", "")).strip()
+            timezone_name = resolve_timezone(candidate)
+            print("[CALENDAR_SYNC]")
+            print("datetime:", normalized_value)
+            print("timezone:", timezone_name)
             body = _build_event_body(candidate)
             created = service.events().insert(calendarId=calendar_id, body=body).execute()
             external_event_id = str(created.get("id", "")).strip()
