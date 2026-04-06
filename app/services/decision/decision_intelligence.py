@@ -154,6 +154,52 @@ DEPENDENCY_REASON_TEMPLATES = {
     "timeline_dependency": "Relevant timing is discussed, but execution timing is not fully finalized.",
     "partner_dependency": "Execution depends on coordination or approval with external institutional partners.",
 }
+DECISION_DEFAULT_MIN_CONFIDENCE_SCORE = 0.5
+DECISION_LABEL_HIGH = "HIGH"
+DECISION_LABEL_MEDIUM = "MEDIUM"
+DECISION_LABEL_LOW = "LOW"
+DECISION_EXPLICIT_VERBS = (
+    "decide",
+    "decided",
+    "approved",
+    "agreed",
+    "finalized",
+    "confirmed",
+    "commit",
+    "committed",
+    "will",
+    "we will",
+    "i will",
+)
+DECISION_ACTIONABLE_VERBS = (
+    "implement",
+    "execute",
+    "deliver",
+    "start",
+    "launch",
+    "assign",
+    "schedule",
+    "submit",
+    "complete",
+    "move forward",
+)
+DECISION_GENERIC_MARKERS = (
+    "we discussed",
+    "we talked",
+    "let's discuss",
+    "think about",
+    "consider",
+    "maybe",
+    "possibly",
+    "perhaps",
+)
+DECISION_TOPIC_FAMILIES: dict[str, tuple[str, ...]] = {
+    "ownership": ("owner", "ownership", "responsible", "authority", "governance"),
+    "funding": ("funding", "finance", "revenue", "budget", "payment", "compensation"),
+    "timeline": ("timeline", "date", "deadline", "schedule", "week", "month", "meeting"),
+    "delivery": ("implement", "execution", "deliver", "launch", "deploy", "build"),
+    "partnership": ("partner", "gtu", "aivancity", "laurent", "michelle"),
+}
 
 
 class DecisionIntelligenceV2Error(RuntimeError):
@@ -339,6 +385,12 @@ class DecisionIntelligenceV2Service:
                 payload["decision_records"] = [fallback]
                 payload = self._sort_records_deterministically(payload)
                 self._enforce_cross_artifact_consistency(payload, executive, intelligence)
+        payload, grounding_stats = self._apply_decision_grounding(
+            payload=payload,
+            transcript_clean=clean_text,
+            transcript_raw=raw_text,
+        )
+        payload = self._sort_records_deterministically(payload)
         self._validate_records(
             payload,
             clean_text,
@@ -363,7 +415,17 @@ class DecisionIntelligenceV2Service:
                 "prompt_version": DECISION_V2_PROMPT_VERSION,
                 "processing_time_seconds": round(time.time() - start_time, 3),
                 "status": "decision_intelligence_v2_completed",
+                "decision_grounding": grounding_stats,
             },
+        )
+        print(
+            "[DECISION_GROUNDING] "
+            f"total_candidates={grounding_stats.get('total_candidates', 0)} "
+            f"rejected_no_evidence={grounding_stats.get('rejected_no_evidence', 0)} "
+            f"rejected_low_confidence={grounding_stats.get('rejected_low_confidence', 0)} "
+            f"rejected_invalid={grounding_stats.get('rejected_invalid', 0)} "
+            f"rejected_conflict={grounding_stats.get('rejected_conflict', 0)} "
+            f"final_accepted={grounding_stats.get('final_accepted', 0)}"
         )
         return DecisionIntelligenceResult(
             meeting_id=meeting_id,
@@ -1756,6 +1818,246 @@ class DecisionIntelligenceV2Service:
         )
         return rec
 
+    def _decision_min_confidence_threshold(self) -> float:
+        raw = str(os.getenv("DECISION_MIN_CONFIDENCE_SCORE", str(DECISION_DEFAULT_MIN_CONFIDENCE_SCORE))).strip()
+        try:
+            parsed = float(raw)
+        except Exception:
+            parsed = DECISION_DEFAULT_MIN_CONFIDENCE_SCORE
+        return max(0.0, min(1.0, parsed))
+
+    def _extract_evidence_snippets(self, rec: dict[str, Any], transcript_clean: str) -> list[str]:
+        snippets: list[str] = []
+        seen: set[str] = set()
+        for ev in rec.get("evidence", []):
+            if not isinstance(ev, str):
+                continue
+            text = ev.strip()
+            if text and text in transcript_clean and text not in seen:
+                snippets.append(text)
+                seen.add(text)
+        span = str(rec.get("evidence_span", "")).strip()
+        if span and span in transcript_clean and span not in seen:
+            snippets.append(span)
+        preferred = self._prefer_sentence_evidence(snippets, transcript_clean)
+        return [s for s in preferred if isinstance(s, str) and s.strip()]
+
+    def _extract_source_timestamps(self, snippets: list[str], transcript_raw: str) -> list[str]:
+        if not transcript_raw.strip() or not snippets:
+            return []
+        ts_pattern = re.compile(r"(?:\[\d{1,2}:\d{2}(?::\d{2})?\]|\b\d{1,2}:\d{2}(?::\d{2})?\b)")
+        found: set[str] = set()
+        for snippet in snippets:
+            start = 0
+            while True:
+                idx = transcript_raw.find(snippet, start)
+                if idx < 0:
+                    break
+                window_start = max(0, idx - 100)
+                window_end = min(len(transcript_raw), idx + len(snippet) + 100)
+                window = transcript_raw[window_start:window_end]
+                for ts in ts_pattern.findall(window):
+                    token = str(ts).strip("[] ")
+                    if token:
+                        found.add(token)
+                start = idx + len(snippet)
+        return sorted(found)
+
+    def _is_multitopic_statement(self, statement: str) -> bool:
+        lowered = statement.lower()
+        families = 0
+        for keywords in DECISION_TOPIC_FAMILIES.values():
+            if any(keyword in lowered for keyword in keywords):
+                families += 1
+        separators = (
+            lowered.count(" and ")
+            + lowered.count(";")
+            + lowered.count(",")
+            + lowered.count(" also ")
+        )
+        return families >= 3 and separators >= 2
+
+    def _is_specific_actionable_decision(self, rec: dict[str, Any]) -> bool:
+        statement = str(rec.get("statement", "")).strip()
+        if not statement:
+            return False
+        words = re.findall(r"[A-Za-z0-9]+", statement)
+        if len(words) < 4 or len(words) > 80:
+            return False
+        lowered = statement.lower()
+        if any(marker in lowered for marker in DECISION_GENERIC_MARKERS):
+            return False
+        has_action_verb = any(verb in lowered for verb in DECISION_ACTIONABLE_VERBS)
+        has_explicit_decision = any(verb in lowered for verb in DECISION_EXPLICIT_VERBS)
+        has_commitment = any(
+            isinstance(cmt, dict)
+            and str(cmt.get("commitment", "")).strip()
+            and cmt.get("commitment_type") in {"explicit_commitment", "implied_commitment"}
+            for cmt in rec.get("commitments", [])
+        )
+        has_owner = bool(str(rec.get("primary_owner", "")).strip())
+        return has_explicit_decision and (has_commitment or has_action_verb or has_owner)
+
+    def _score_decision_confidence(self, rec: dict[str, Any], evidence_snippets: list[str]) -> tuple[float, str]:
+        statement = str(rec.get("statement", "")).strip().lower()
+        merged = " ".join([statement] + [s.lower() for s in evidence_snippets])
+        score = 0.2
+
+        if any(verb in merged for verb in DECISION_EXPLICIT_VERBS):
+            score += 0.35
+        elif any(
+            isinstance(cmt, dict) and cmt.get("commitment_type") == "explicit_commitment"
+            for cmt in rec.get("commitments", [])
+        ):
+            score += 0.25
+
+        evidence_count = len(evidence_snippets)
+        if evidence_count >= 3:
+            score += 0.25
+        elif evidence_count == 2:
+            score += 0.2
+        elif evidence_count == 1:
+            score += 0.1
+
+        if self._is_specific_actionable_decision(rec):
+            score += 0.2
+        if not self._is_multitopic_statement(statement):
+            score += 0.05
+
+        support_level = str(rec.get("support_level", "")).strip()
+        claim_strength = str(rec.get("claim_strength", "")).strip()
+        if support_level == "WEAK_INFERENCE" or claim_strength == "weak":
+            score -= 0.35
+
+        if any(marker in merged for marker in UNCERTAINTY_MARKERS):
+            score -= 0.2
+        if any(marker in merged for marker in CONDITIONAL_MARKERS):
+            score -= 0.1
+
+        certainty_class = str(rec.get("certainty_class", "")).upper()
+        if certainty_class in {"UNCERTAIN", "CONDITIONAL"}:
+            score -= 0.1
+
+        clamped = max(0.0, min(1.0, round(score, 3)))
+        if clamped >= 0.75:
+            return clamped, DECISION_LABEL_HIGH
+        if clamped >= 0.5:
+            return clamped, DECISION_LABEL_MEDIUM
+        return clamped, DECISION_LABEL_LOW
+
+    def _decision_dedup_key(self, rec: dict[str, Any]) -> str:
+        decision_text = str(rec.get("decision_text", rec.get("statement", ""))).lower()
+        owner = str(rec.get("owner", rec.get("primary_owner", ""))).lower()
+        tokens = [
+            tok
+            for tok in re.findall(r"[a-z0-9]+", decision_text)
+            if len(tok) >= 4 and tok not in {"that", "this", "with", "from", "were", "have"}
+        ]
+        token_str = " ".join(tokens[:14]) if tokens else decision_text.strip()
+        return f"{owner}|{token_str}"
+
+    def _resolve_conflicting_duplicates(
+        self,
+        records: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for rec in records:
+            key = self._decision_dedup_key(rec)
+            grouped.setdefault(key, []).append(rec)
+
+        kept: list[dict[str, Any]] = []
+        rejected = 0
+        for key in sorted(grouped.keys()):
+            rows = grouped[key]
+            if len(rows) == 1:
+                kept.append(rows[0])
+                continue
+            signatures = {
+                (
+                    str(row.get("state", "")).strip(),
+                    str(row.get("decision_status", "")).strip(),
+                )
+                for row in rows
+            }
+            if len(signatures) > 1:
+                rejected += len(rows)
+                continue
+
+            ordered = sorted(
+                rows,
+                key=lambda row: (
+                    float(row.get("confidence_score", 0.0) or 0.0),
+                    int(row.get("evidence_count", 0) or 0),
+                    str(row.get("decision_id", "")).strip(),
+                ),
+                reverse=True,
+            )
+            kept.append(ordered[0])
+            rejected += len(ordered) - 1
+        return kept, rejected
+
+    def _apply_decision_grounding(
+        self,
+        payload: dict[str, Any],
+        transcript_clean: str,
+        transcript_raw: str,
+    ) -> tuple[dict[str, Any], dict[str, int | float]]:
+        rows = payload.get("decision_records", [])
+        if not isinstance(rows, list):
+            rows = []
+        stats: dict[str, int | float] = {
+            "total_candidates": len(rows),
+            "rejected_no_evidence": 0,
+            "rejected_low_confidence": 0,
+            "rejected_invalid": 0,
+            "rejected_conflict": 0,
+            "final_accepted": 0,
+            "min_confidence_threshold": self._decision_min_confidence_threshold(),
+        }
+
+        accepted: list[dict[str, Any]] = []
+        threshold = float(stats["min_confidence_threshold"])
+        for rec in rows:
+            if not isinstance(rec, dict):
+                stats["rejected_invalid"] += 1
+                continue
+
+            evidence_snippets = self._extract_evidence_snippets(rec, transcript_clean)
+            if not evidence_snippets:
+                stats["rejected_no_evidence"] += 1
+                continue
+
+            if str(rec.get("support_level", "")).strip() == "WEAK_INFERENCE" or str(rec.get("claim_strength", "")).strip() == "weak":
+                stats["rejected_invalid"] += 1
+                continue
+            if self._is_multitopic_statement(str(rec.get("statement", "")).strip()):
+                stats["rejected_invalid"] += 1
+                continue
+            if not self._is_specific_actionable_decision(rec):
+                stats["rejected_invalid"] += 1
+                continue
+
+            confidence_score, confidence_label = self._score_decision_confidence(rec, evidence_snippets)
+            if confidence_score < threshold or confidence_label == DECISION_LABEL_LOW:
+                stats["rejected_low_confidence"] += 1
+                continue
+
+            enriched = dict(rec)
+            enriched["decision_text"] = str(rec.get("statement", "")).strip()
+            enriched["owner"] = str(rec.get("primary_owner", "")).strip()
+            enriched["evidence_snippets"] = evidence_snippets
+            enriched["evidence_count"] = len(evidence_snippets)
+            enriched["source_timestamps"] = self._extract_source_timestamps(evidence_snippets, transcript_raw)
+            enriched["confidence_score"] = confidence_score
+            enriched["confidence_label"] = confidence_label
+            accepted.append(enriched)
+
+        deduped, rejected_conflict = self._resolve_conflicting_duplicates(accepted)
+        stats["rejected_conflict"] = rejected_conflict
+        stats["final_accepted"] = len(deduped)
+        payload["decision_records"] = deduped
+        return payload, stats
+
     def _augment_dependencies(
         self,
         rec: dict[str, Any],
@@ -1956,6 +2258,38 @@ class DecisionIntelligenceV2Service:
                 raise DecisionIntelligenceV2Error("Invalid decision evidence_confidence") from exc
             if evidence_conf < 0.5:
                 raise DecisionIntelligenceV2Error("Decision evidence_confidence below threshold")
+            decision_text = str(rec.get("decision_text", "")).strip()
+            if not decision_text:
+                raise DecisionIntelligenceV2Error("decision_text is required after grounding")
+            owner = str(rec.get("owner", "")).strip()
+            if owner and owner != str(rec.get("primary_owner", "")).strip():
+                raise DecisionIntelligenceV2Error("owner must match primary_owner when provided")
+            snippets = rec.get("evidence_snippets", [])
+            if not isinstance(snippets, list) or not snippets:
+                raise DecisionIntelligenceV2Error("evidence_snippets must include at least one transcript snippet")
+            for snippet in snippets:
+                if not isinstance(snippet, str) or not snippet.strip() or snippet not in transcript_clean:
+                    raise DecisionIntelligenceV2Error("evidence_snippets must be exact transcript substrings")
+            if int(rec.get("evidence_count", 0) or 0) != len(snippets):
+                raise DecisionIntelligenceV2Error("evidence_count must equal evidence_snippets length")
+            timestamps = rec.get("source_timestamps", [])
+            if not isinstance(timestamps, list):
+                raise DecisionIntelligenceV2Error("source_timestamps must be a list")
+            for ts in timestamps:
+                if not isinstance(ts, str):
+                    raise DecisionIntelligenceV2Error("source_timestamps must contain strings")
+            try:
+                conf_score = float(rec.get("confidence_score", 0.0))
+            except Exception as exc:
+                raise DecisionIntelligenceV2Error("confidence_score must be numeric") from exc
+            if conf_score < 0.0 or conf_score > 1.0:
+                raise DecisionIntelligenceV2Error("confidence_score must be in [0,1]")
+            if str(rec.get("confidence_label", "")).strip() not in {
+                DECISION_LABEL_HIGH,
+                DECISION_LABEL_MEDIUM,
+                DECISION_LABEL_LOW,
+            }:
+                raise DecisionIntelligenceV2Error("Invalid confidence_label")
 
             owners = rec.get("owners", [])
             for owner in owners:

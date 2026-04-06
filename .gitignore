@@ -10,3 +10,5 @@ google_gmail_token.json
 google_gmail_client_secret.json
 client_secret_*.json
 data/processed/*/calendar/calendar_sync_log.json
+.tmp/phase141_api*.log
+phase141_api*.log

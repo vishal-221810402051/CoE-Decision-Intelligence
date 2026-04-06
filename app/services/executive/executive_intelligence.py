@@ -633,23 +633,31 @@ IMPORTANT:
             warnings = []
             data["executive_warnings"] = warnings
 
-        primary_executor = ex.get("primary_executor")
         responsibility_load = ex.get("responsibility_load")
         risk_score = ex.get("execution_risk_score")
 
-        if (
-            isinstance(primary_executor, str)
-            and primary_executor.strip()
-            and responsibility_load == "high"
-            and risk_score == "high"
-        ):
-            has_equivalent = any(
+        if responsibility_load == "high" and risk_score == "high":
+            def _is_structural_warning_payload(row: dict[str, Any]) -> bool:
+                text = (
+                    f"{str(row.get('warning', '')).strip()} "
+                    f"{str(row.get('reason', '')).strip()}"
+                ).lower()
+                if "execution responsibility" not in text:
+                    return False
+                return any(token in text for token in ("authority", "compensation", "governance"))
+
+            has_equivalent_high = any(
                 isinstance(row, dict)
-                and "execution responsibility" in str(row.get("warning", "")).lower()
-                and ("authority" in str(row.get("warning", "")).lower() or "governance" in str(row.get("warning", "")).lower())
+                and str(row.get("severity", "")).lower() == "high"
+                and _is_structural_warning_payload(row)
                 for row in warnings
             )
-            if has_equivalent:
+            if has_equivalent_high:
+                print(
+                    "[EXEC_STRUCTURAL_WARNING] "
+                    "injected=false "
+                    "reason=high_severity_equivalent_exists"
+                )
                 return
 
             evidence = ex.get("evidence", [])
@@ -673,6 +681,11 @@ IMPORTANT:
                     "evidence_end_index": -1,
                     "evidence_confidence": 1.0 if evidence_text else 0.0,
                 }
+            )
+            print(
+                "[EXEC_STRUCTURAL_WARNING] "
+                "injected=true "
+                "reason=missing_high_severity_equivalent"
             )
 
     def _evidence_list_from_binding(
