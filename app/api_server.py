@@ -12,7 +12,14 @@ from app.services.audio import AudioIntakeService
 from app.services.calendar import approve, load_candidate_set, reject
 from app.services.calendar.sync_engine import process_calendar_sync
 from app.services.email import send_pdf_email
-from app.services.meetings import archive_meeting, get_meeting_detail, is_valid_meeting_id, list_recent_meetings, resolve_report_pdf
+from app.services.meetings import (
+    archive_meeting,
+    get_meeting_detail,
+    get_processing_status,
+    is_valid_meeting_id,
+    list_recent_meetings,
+    resolve_report_pdf,
+)
 from app.services.pipeline.orchestrator import run_full_pipeline
 
 app = FastAPI(title="CoE Decision Intelligence Upload API")
@@ -174,6 +181,20 @@ async def meeting_detail(meeting_id: str) -> object:
         return _error(404, "MEETING_NOT_FOUND", f"Meeting not found: {meeting_key}")
     except Exception as exc:
         return _error(500, "MEETING_DETAIL_LOAD_FAILED", f"Failed to load meeting detail: {exc}")
+    return payload
+
+
+@app.get("/api/meetings/{meeting_id}/processing-status")
+async def meeting_processing_status(meeting_id: str) -> object:
+    meeting_key = str(meeting_id).strip()
+    if not is_valid_meeting_id(meeting_key):
+        return _error(400, "INVALID_MEETING_ID", "meeting_id must match pattern MTG-* and contain no path separators.")
+    if not _meeting_exists(meeting_key):
+        return _error(404, "MEETING_NOT_FOUND", f"Meeting not found: {meeting_key}")
+    try:
+        payload = get_processing_status(meeting_key)
+    except Exception as exc:
+        return _error(500, "PROCESSING_STATUS_LOAD_FAILED", f"Failed to load processing status: {exc}")
     return payload
 
 
