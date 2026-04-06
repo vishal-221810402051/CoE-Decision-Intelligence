@@ -193,6 +193,29 @@ DECISION_GENERIC_MARKERS = (
     "possibly",
     "perhaps",
 )
+DECISION_NON_ACTIONABLE_MARKERS = (
+    "we discussed",
+    "we talked",
+    "it was mentioned",
+    "there is a need to",
+    "great thing",
+    "great initiative",
+    "this is an idea",
+    "what do i do",
+    "what are",
+    "would you consider",
+    "should we",
+)
+DECISION_OWNER_GENERIC = {
+    "team",
+    "we",
+    "someone",
+    "somebody",
+    "they",
+    "everyone",
+    "group",
+    "people",
+}
 DECISION_TOPIC_FAMILIES: dict[str, tuple[str, ...]] = {
     "ownership": ("owner", "ownership", "responsible", "authority", "governance"),
     "funding": ("funding", "finance", "revenue", "budget", "payment", "compensation"),
@@ -423,8 +446,12 @@ class DecisionIntelligenceV2Service:
             f"total_candidates={grounding_stats.get('total_candidates', 0)} "
             f"rejected_no_evidence={grounding_stats.get('rejected_no_evidence', 0)} "
             f"rejected_low_confidence={grounding_stats.get('rejected_low_confidence', 0)} "
+            f"rejected_non_actionable={grounding_stats.get('rejected_non_actionable', 0)} "
             f"rejected_invalid={grounding_stats.get('rejected_invalid', 0)} "
             f"rejected_conflict={grounding_stats.get('rejected_conflict', 0)} "
+            f"refined_count={grounding_stats.get('refined_count', 0)} "
+            f"split_count={grounding_stats.get('split_count', 0)} "
+            f"owner_unassigned_count={grounding_stats.get('owner_unassigned_count', 0)} "
             f"final_accepted={grounding_stats.get('final_accepted', 0)}"
         )
         return DecisionIntelligenceResult(
@@ -1896,7 +1923,144 @@ class DecisionIntelligenceV2Service:
             for cmt in rec.get("commitments", [])
         )
         has_owner = bool(str(rec.get("primary_owner", "")).strip())
-        return has_explicit_decision and (has_commitment or has_action_verb or has_owner)
+        return (has_explicit_decision or has_action_verb) and (has_commitment or has_action_verb or has_owner)
+
+    def _clean_clause(self, text: str) -> str:
+        value = " ".join(str(text or "").strip().split())
+        value = re.sub(r"^[,;:\-\s]+", "", value).strip()
+        value = re.sub(r"\b(and|then)\b$", "", value, flags=re.IGNORECASE).strip()
+        return value
+
+    def _is_non_actionable_statement(self, statement: str, rec: dict[str, Any]) -> bool:
+        lowered = statement.lower().strip()
+        if not lowered:
+            return True
+        if "?" in lowered:
+            return True
+        if any(lowered.startswith(prefix) for prefix in ("what ", "why ", "how ", "when ", "where ", "who ")):
+            return True
+        if any(marker in lowered for marker in DECISION_NON_ACTIONABLE_MARKERS):
+            return True
+        if any(marker in lowered for marker in UNCERTAINTY_MARKERS) and not any(
+            verb in lowered for verb in DECISION_ACTIONABLE_VERBS
+        ):
+            return True
+        has_commitment = any(
+            isinstance(cmt, dict)
+            and cmt.get("commitment_type") in {"explicit_commitment", "implied_commitment"}
+            and str(cmt.get("commitment", "")).strip()
+            for cmt in rec.get("commitments", [])
+        )
+        has_action = any(verb in lowered for verb in DECISION_ACTIONABLE_VERBS)
+        return not (has_commitment or has_action)
+
+    def _split_record_actions(self, rec: dict[str, Any]) -> list[dict[str, Any]]:
+        statement = str(rec.get("statement", "")).strip()
+        if not statement:
+            return [rec]
+        normalized = re.sub(r"\s+", " ", statement)
+        delimiters = re.split(r"\s*;\s*|\s+\band\b\s+", normalized, flags=re.IGNORECASE)
+        parts = [self._clean_clause(part) for part in delimiters if self._clean_clause(part)]
+        if len(parts) <= 1:
+            return [rec]
+        actionable_parts: list[str] = []
+        for part in parts:
+            lowered = part.lower()
+            if self._is_non_actionable_statement(part, rec):
+                continue
+            if any(verb in lowered for verb in DECISION_ACTIONABLE_VERBS + DECISION_EXPLICIT_VERBS):
+                actionable_parts.append(part)
+        if len(actionable_parts) <= 1:
+            return [rec]
+        out: list[dict[str, Any]] = []
+        for idx, part in enumerate(actionable_parts, start=1):
+            cloned = dict(rec)
+            cloned["statement"] = part
+            base_id = str(rec.get("decision_id", "")).strip()
+            if base_id:
+                cloned["decision_id"] = f"{base_id}-S{idx}"
+            out.append(cloned)
+        return out
+
+    def _refine_decision_text(self, statement: str) -> str:
+        text = " ".join(str(statement or "").strip().split())
+        if not text:
+            return ""
+        lowered = text.lower()
+        replacements = (
+            (r"^\s*we\s+will\s+", ""),
+            (r"^\s*i\s+will\s+", ""),
+            (r"^\s*let'?s\s+", ""),
+            (r"^\s*there\s+is\s+a\s+need\s+to\s+", ""),
+            (r"^\s*it\s+was\s+mentioned\s+that\s+", ""),
+            (r"^\s*we\s+need\s+to\s+", ""),
+        )
+        for pattern, repl in replacements:
+            text = re.sub(pattern, repl, text, flags=re.IGNORECASE).strip()
+        lowered = text.lower()
+
+        if lowered.startswith("meet "):
+            text = f"Schedule {text}".strip()
+        elif " meet " in f" {lowered} " and not lowered.startswith("schedule "):
+            text = f"Schedule {text}".strip()
+        elif " assign " in f" {lowered} " and not lowered.startswith("assign "):
+            text = f"Assign {text}".strip()
+        elif "move forward" in lowered and not lowered.startswith("proceed "):
+            text = f"Proceed with {text}".strip()
+        elif " start " in f" {lowered} " and not lowered.startswith("start "):
+            text = f"Start {text}".strip()
+        elif " finalize " in f" {lowered} " and not lowered.startswith("finalize "):
+            text = f"Finalize {text}".strip()
+        elif " define " in f" {lowered} " and not lowered.startswith("define "):
+            text = f"Define {text}".strip()
+
+        text = self._clean_clause(text)
+        if not text:
+            return ""
+        text = text[0].upper() + text[1:] if len(text) > 1 else text.upper()
+        if not text.endswith("."):
+            text += "."
+        return text
+
+    def _is_generic_owner(self, name: str) -> bool:
+        cleaned = str(name or "").strip().lower()
+        if not cleaned:
+            return True
+        if cleaned in DECISION_OWNER_GENERIC:
+            return True
+        if re.fullmatch(r"(the\s+)?team", cleaned):
+            return True
+        return False
+
+    def _resolve_decision_owner(self, rec: dict[str, Any], transcript_clean: str) -> tuple[str, str, float]:
+        primary_owner = str(rec.get("primary_owner", "")).strip()
+        if primary_owner and not self._is_generic_owner(primary_owner):
+            if actor_present_in_transcript(primary_owner, transcript_clean, alias_map={}):
+                return primary_owner, primary_owner, float(rec.get("owner_confidence", 1.0) or 1.0)
+
+        owners = [o for o in rec.get("owners", []) if isinstance(o, dict)]
+        for owner in owners:
+            actor = str(owner.get("actor", "")).strip()
+            if not actor or self._is_generic_owner(actor):
+                continue
+            if owner.get("ownership_type") not in {"assigned_owner", "shared_owner"}:
+                continue
+            actor_conf = float(owner.get("actor_confidence", 0.0) or 0.0)
+            if actor_conf < 0.75:
+                continue
+            if actor_present_in_transcript(actor, transcript_clean, alias_map={}):
+                return actor, actor, actor_conf
+
+        for cmt in rec.get("commitments", []):
+            if not isinstance(cmt, dict):
+                continue
+            actor = str(cmt.get("actor", "")).strip()
+            if not actor or self._is_generic_owner(actor):
+                continue
+            if actor_present_in_transcript(actor, transcript_clean, alias_map={}):
+                return actor, actor, float(cmt.get("actor_confidence", 0.85) or 0.85)
+
+        return "", "Unassigned", 0.0
 
     def _score_decision_confidence(self, rec: dict[str, Any], evidence_snippets: list[str]) -> tuple[float, str]:
         statement = str(rec.get("statement", "")).strip().lower()
@@ -2010,7 +2174,11 @@ class DecisionIntelligenceV2Service:
             "rejected_no_evidence": 0,
             "rejected_low_confidence": 0,
             "rejected_invalid": 0,
+            "rejected_non_actionable": 0,
             "rejected_conflict": 0,
+            "refined_count": 0,
+            "split_count": 0,
+            "owner_unassigned_count": 0,
             "final_accepted": 0,
             "min_confidence_threshold": self._decision_min_confidence_threshold(),
         }
@@ -2022,35 +2190,61 @@ class DecisionIntelligenceV2Service:
                 stats["rejected_invalid"] += 1
                 continue
 
-            evidence_snippets = self._extract_evidence_snippets(rec, transcript_clean)
-            if not evidence_snippets:
-                stats["rejected_no_evidence"] += 1
-                continue
+            split_records = self._split_record_actions(rec)
+            if len(split_records) > 1:
+                stats["split_count"] += len(split_records) - 1
+            for split_rec in split_records:
+                evidence_snippets = self._extract_evidence_snippets(split_rec, transcript_clean)
+                if not evidence_snippets:
+                    stats["rejected_no_evidence"] += 1
+                    continue
 
-            if str(rec.get("support_level", "")).strip() == "WEAK_INFERENCE" or str(rec.get("claim_strength", "")).strip() == "weak":
-                stats["rejected_invalid"] += 1
-                continue
-            if self._is_multitopic_statement(str(rec.get("statement", "")).strip()):
-                stats["rejected_invalid"] += 1
-                continue
-            if not self._is_specific_actionable_decision(rec):
-                stats["rejected_invalid"] += 1
-                continue
+                if str(split_rec.get("support_level", "")).strip() == "WEAK_INFERENCE" or str(split_rec.get("claim_strength", "")).strip() == "weak":
+                    stats["rejected_invalid"] += 1
+                    continue
+                if self._is_multitopic_statement(str(split_rec.get("statement", "")).strip()):
+                    stats["rejected_invalid"] += 1
+                    continue
+                if self._is_non_actionable_statement(str(split_rec.get("statement", "")).strip(), split_rec):
+                    stats["rejected_non_actionable"] += 1
+                    continue
+                if not self._is_specific_actionable_decision(split_rec):
+                    stats["rejected_invalid"] += 1
+                    continue
 
-            confidence_score, confidence_label = self._score_decision_confidence(rec, evidence_snippets)
-            if confidence_score < threshold or confidence_label == DECISION_LABEL_LOW:
-                stats["rejected_low_confidence"] += 1
-                continue
+                confidence_score, confidence_label = self._score_decision_confidence(split_rec, evidence_snippets)
+                if confidence_score < threshold or confidence_label == DECISION_LABEL_LOW:
+                    stats["rejected_low_confidence"] += 1
+                    continue
 
-            enriched = dict(rec)
-            enriched["decision_text"] = str(rec.get("statement", "")).strip()
-            enriched["owner"] = str(rec.get("primary_owner", "")).strip()
-            enriched["evidence_snippets"] = evidence_snippets
-            enriched["evidence_count"] = len(evidence_snippets)
-            enriched["source_timestamps"] = self._extract_source_timestamps(evidence_snippets, transcript_raw)
-            enriched["confidence_score"] = confidence_score
-            enriched["confidence_label"] = confidence_label
-            accepted.append(enriched)
+                refined_text = self._refine_decision_text(str(split_rec.get("statement", "")).strip())
+                if not refined_text:
+                    stats["rejected_non_actionable"] += 1
+                    continue
+                if refined_text != str(split_rec.get("statement", "")).strip():
+                    stats["refined_count"] += 1
+
+                resolved_primary_owner, owner_label, owner_conf = self._resolve_decision_owner(
+                    split_rec,
+                    transcript_clean,
+                )
+
+                enriched = dict(split_rec)
+                enriched["decision_text"] = refined_text
+                enriched["primary_owner"] = resolved_primary_owner
+                enriched["owner"] = owner_label
+                if not resolved_primary_owner:
+                    stats["owner_unassigned_count"] += 1
+                    enriched["owner_confidence"] = 0.0
+                else:
+                    enriched["owner_confidence"] = max(float(enriched.get("owner_confidence", 0.0) or 0.0), owner_conf)
+                enriched = self._enforce_missing_owner_gap(enriched)
+                enriched["evidence_snippets"] = evidence_snippets
+                enriched["evidence_count"] = len(evidence_snippets)
+                enriched["source_timestamps"] = self._extract_source_timestamps(evidence_snippets, transcript_raw)
+                enriched["confidence_score"] = confidence_score
+                enriched["confidence_label"] = confidence_label
+                accepted.append(enriched)
 
         deduped, rejected_conflict = self._resolve_conflicting_duplicates(accepted)
         stats["rejected_conflict"] = rejected_conflict
@@ -2262,8 +2456,11 @@ class DecisionIntelligenceV2Service:
             if not decision_text:
                 raise DecisionIntelligenceV2Error("decision_text is required after grounding")
             owner = str(rec.get("owner", "")).strip()
-            if owner and owner != str(rec.get("primary_owner", "")).strip():
+            primary_owner_value = str(rec.get("primary_owner", "")).strip()
+            if owner and owner != "Unassigned" and owner != primary_owner_value:
                 raise DecisionIntelligenceV2Error("owner must match primary_owner when provided")
+            if owner == "Unassigned" and primary_owner_value:
+                raise DecisionIntelligenceV2Error("Unassigned owner cannot coexist with primary_owner")
             snippets = rec.get("evidence_snippets", [])
             if not isinstance(snippets, list) or not snippets:
                 raise DecisionIntelligenceV2Error("evidence_snippets must include at least one transcript snippet")
@@ -2506,6 +2703,79 @@ class DecisionIntelligenceV2Service:
         executive: dict[str, Any],
         intelligence: dict[str, Any],
     ) -> None:
+        def _known_exec_actor_set(exec_payload: dict[str, Any]) -> set[str]:
+            known: set[str] = set()
+            if not isinstance(exec_payload, dict):
+                return known
+            power = exec_payload.get("power_structure", {})
+            roles = exec_payload.get("role_clarity_assessment", [])
+            if isinstance(power, dict):
+                for key in [
+                    "sponsor",
+                    "strategic_authority",
+                    "decision_makers",
+                    "advisors",
+                    "executors",
+                    "implementation_owner",
+                ]:
+                    values = power.get(key, [])
+                    if not isinstance(values, list):
+                        continue
+                    for value in values:
+                        actor = str(value or "").strip().lower()
+                        if actor:
+                            known.add(actor)
+            if isinstance(roles, list):
+                for row in roles:
+                    if not isinstance(row, dict):
+                        continue
+                    actor = str(row.get("actor", "")).strip().lower()
+                    if actor:
+                        known.add(actor)
+            return known
+
+        def _classify_owner_type(owner: str) -> str:
+            text = str(owner or "").strip().lower()
+            if not text:
+                return "UNKNOWN"
+            collective_markers = {
+                "we",
+                "team",
+                "leadership",
+                "management",
+                "committee",
+                "group",
+                "everyone",
+                "all",
+            }
+            if text in collective_markers or any(
+                token in text
+                for token in (
+                    " leadership",
+                    " team",
+                    " committee",
+                    " management",
+                    " all ",
+                    " we ",
+                )
+            ):
+                return "COLLECTIVE"
+            org_tokens = (
+                "aivancity",
+                "gtu",
+                "university",
+                "institution",
+                "center of excellence",
+                "coe",
+                "company",
+                "partner",
+                "school",
+                "faculty",
+            )
+            if any(token in text for token in org_tokens):
+                return "ORGANIZATION"
+            return "UNKNOWN"
+
         issues = validate_cross_artifact_consistency(executive, payload, intelligence=intelligence)
         if not issues:
             return
@@ -2515,6 +2785,7 @@ class DecisionIntelligenceV2Service:
             raise DecisionIntelligenceV2Error("Cross-artifact consistency failure: invalid decision_records")
         certainty_anchors = self._build_intelligence_certainty_anchors(intelligence)
         anchor_corpus = self._build_intelligence_anchor_corpus(intelligence)
+        known_exec_actors = _known_exec_actor_set(executive)
         kept_rows: list[dict[str, Any]] = []
         for rec in rows:
             if not isinstance(rec, dict):
@@ -2526,6 +2797,36 @@ class DecisionIntelligenceV2Service:
                     rec["state"] = "tentative"
             rec = self._filter_weak_dependencies(rec, threshold=0.6)
             rec = self._enforce_owner_conservatism(rec, min_conf=0.75)
+            owner_value = str(rec.get("primary_owner", "")).strip()
+            owner_norm = owner_value.lower()
+            if owner_value and owner_norm not in known_exec_actors:
+                owner_type = _classify_owner_type(owner_value)
+                rec["owner_raw"] = owner_value
+                rec["owner_type"] = owner_type.lower()
+                rec["primary_owner"] = ""
+                rec["owner_confidence"] = 0.0
+                rec["missing_owner"] = True
+                rec["missing_owner_reason"] = (
+                    "non_resolvable_collective_or_organization"
+                    if owner_type in {"ORGANIZATION", "COLLECTIVE"}
+                    else "non_resolvable_unknown_owner"
+                )
+                rec["owners"] = [
+                    {
+                        "actor": "",
+                        "ownership_type": "missing_owner",
+                        "actor_confidence": 0.0,
+                        "support_level": "WEAK_INFERENCE",
+                        "evidence_confidence": 0.0,
+                    }
+                ]
+                rec = self._enforce_missing_owner_gap(rec)
+                print(
+                    "[OWNER_NORMALIZATION] "
+                    f'original="{owner_value}" '
+                    'action="downgraded_to_missing_owner" '
+                    'reason="not_in_executive_actor_map"'
+                )
             cap = self._best_anchor_certainty(rec, certainty_anchors)
             if cap in {"UNCERTAIN", "CONDITIONAL"}:
                 rec["certainty_class"] = cap
