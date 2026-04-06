@@ -172,6 +172,7 @@ DECISION_EXPLICIT_VERBS = (
     "i will",
 )
 DECISION_ACTIONABLE_VERBS = (
+    "develop",
     "implement",
     "execute",
     "deliver",
@@ -179,6 +180,11 @@ DECISION_ACTIONABLE_VERBS = (
     "launch",
     "assign",
     "schedule",
+    "meet",
+    "attend",
+    "proceed",
+    "finalize",
+    "follow up",
     "submit",
     "complete",
     "move forward",
@@ -216,6 +222,22 @@ DECISION_OWNER_GENERIC = {
     "group",
     "people",
 }
+DECISION_EXPLICIT_COMMITMENT_MARKERS = (
+    "we will meet",
+    "let's meet",
+    "lets meet",
+    "i will attend",
+    "we agreed to proceed",
+    "agreed to proceed",
+    "we will proceed",
+    "we will finalize",
+    "let's finalize",
+    "i will join",
+    "that works for me",
+    "i am definitely okay",
+    "scheduled",
+    "next meeting",
+)
 DECISION_TOPIC_FAMILIES: dict[str, tuple[str, ...]] = {
     "ownership": ("owner", "ownership", "responsible", "authority", "governance"),
     "funding": ("funding", "finance", "revenue", "budget", "payment", "compensation"),
@@ -385,6 +407,7 @@ class DecisionIntelligenceV2Service:
         parsed = self._safe_parse_json(response.choices[0].message.content or "")
         if parsed is None:
             raise DecisionIntelligenceV2Error("Model did not return valid JSON")
+        raw_model_candidates_count = len(parsed.get("decision_records", [])) if isinstance(parsed.get("decision_records", []), list) else 0
 
         payload = self._enforce_schema(parsed)
         payload = self._normalize_with_registry(payload, alias_map)
@@ -397,8 +420,10 @@ class DecisionIntelligenceV2Service:
             executive_primary,
             primary_actor_name,
         )
+        post_hardening_count = len(payload.get("decision_records", [])) if isinstance(payload.get("decision_records", []), list) else 0
         payload = self._sort_records_deterministically(payload)
         self._enforce_cross_artifact_consistency(payload, executive, intelligence)
+        post_cross_artifact_consistency_count = len(payload.get("decision_records", [])) if isinstance(payload.get("decision_records", []), list) else 0
         if not payload.get("decision_records"):
             fallback = self._build_fallback_record_from_intelligence(
                 intelligence=intelligence,
@@ -408,11 +433,16 @@ class DecisionIntelligenceV2Service:
                 payload["decision_records"] = [fallback]
                 payload = self._sort_records_deterministically(payload)
                 self._enforce_cross_artifact_consistency(payload, executive, intelligence)
+                post_cross_artifact_consistency_count = len(payload.get("decision_records", [])) if isinstance(payload.get("decision_records", []), list) else 0
+        pre_grounding_count = len(payload.get("decision_records", [])) if isinstance(payload.get("decision_records", []), list) else 0
         payload, grounding_stats = self._apply_decision_grounding(
             payload=payload,
             transcript_clean=clean_text,
             transcript_raw=raw_text,
         )
+        post_grounding_count = int(grounding_stats.get("post_grounding_count", 0) or 0)
+        post_non_actionable_filter_count = int(grounding_stats.get("post_non_actionable_filter_count", 0) or 0)
+        post_conflict_dedup_count = int(grounding_stats.get("post_conflict_dedup_count", 0) or 0)
         payload = self._sort_records_deterministically(payload)
         self._validate_records(
             payload,
@@ -423,6 +453,24 @@ class DecisionIntelligenceV2Service:
         )
         payload["operational_summary"] = self._build_operational_summary(payload["decision_records"])
         self._validate_final(payload)
+        final_saved_count = len(payload.get("decision_records", [])) if isinstance(payload.get("decision_records", []), list) else 0
+
+        decision_flow = {
+            "raw_model_candidates_count": raw_model_candidates_count,
+            "post_hardening_count": post_hardening_count,
+            "post_cross_artifact_consistency_count": post_cross_artifact_consistency_count,
+            "pre_grounding_count": pre_grounding_count,
+            "post_grounding_count": post_grounding_count,
+            "post_non_actionable_filter_count": post_non_actionable_filter_count,
+            "post_conflict_dedup_count": post_conflict_dedup_count,
+            "post_grounding_saved_count": int(grounding_stats.get("final_accepted", 0) or 0),
+            "final_saved_count": final_saved_count,
+            "rejected_no_evidence": int(grounding_stats.get("rejected_no_evidence", 0) or 0),
+            "rejected_low_confidence": int(grounding_stats.get("rejected_low_confidence", 0) or 0),
+            "rejected_invalid": int(grounding_stats.get("rejected_invalid", 0) or 0),
+            "rejected_non_actionable": int(grounding_stats.get("rejected_non_actionable", 0) or 0),
+            "rejected_conflict": int(grounding_stats.get("rejected_conflict", 0) or 0),
+        }
 
         decision_dir.mkdir(parents=True, exist_ok=True)
         metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -439,7 +487,17 @@ class DecisionIntelligenceV2Service:
                 "processing_time_seconds": round(time.time() - start_time, 3),
                 "status": "decision_intelligence_v2_completed",
                 "decision_grounding": grounding_stats,
+                "decision_flow": decision_flow,
             },
+        )
+        print(
+            "[DECISION_FLOW] "
+            f"raw={raw_model_candidates_count} "
+            f"hardened={post_hardening_count} "
+            f"consistency={post_cross_artifact_consistency_count} "
+            f"pre_grounding={pre_grounding_count} "
+            f"post_grounding={post_grounding_count} "
+            f"final={final_saved_count}"
         )
         print(
             "[DECISION_GROUNDING] "
@@ -974,27 +1032,92 @@ class DecisionIntelligenceV2Service:
         intelligence: dict[str, Any],
         transcript_clean: str,
     ) -> dict[str, Any] | None:
-        decisions = intelligence.get("decisions", []) if isinstance(intelligence, dict) else []
-        if not isinstance(decisions, list) or not decisions:
+        if not isinstance(intelligence, dict):
             return None
-        first = decisions[0]
-        if not isinstance(first, dict):
+
+        candidate: dict[str, Any] | None = None
+        decisions = intelligence.get("decisions", [])
+        if isinstance(decisions, list):
+            for row in decisions:
+                if not isinstance(row, dict):
+                    continue
+                statement = str(row.get("text", "")).strip()
+                evidence = str(row.get("evidence", "")).strip()
+                if not statement:
+                    continue
+                if not evidence or evidence not in transcript_clean:
+                    evidence = self._recover_evidence({"statement": statement, "evidence": [statement]}, transcript_clean)
+                if not evidence:
+                    continue
+                candidate = {
+                    "statement": statement,
+                    "evidence": evidence,
+                    "support_level": str(row.get("support_level", "")).strip(),
+                    "claim_strength": str(row.get("claim_strength", "")).strip(),
+                    "certainty_class": str(row.get("certainty_class", "UNCERTAIN")).strip().upper() or "UNCERTAIN",
+                    "source_kind": "decisions",
+                }
+                break
+
+        if candidate is None:
+            action_plan = intelligence.get("action_plan", [])
+            if isinstance(action_plan, list):
+                for row in action_plan:
+                    if not isinstance(row, dict):
+                        continue
+                    statement = str(row.get("task", "")).strip()
+                    evidence = str(row.get("evidence", "")).strip()
+                    if not statement:
+                        continue
+                    if not self._contains_explicit_commitment_marker(statement, evidence):
+                        continue
+                    recovered = self._recover_evidence(
+                        {"statement": statement, "evidence": [statement, evidence]},
+                        transcript_clean,
+                    )
+                    if recovered:
+                        evidence = recovered
+                    if not evidence or evidence not in transcript_clean:
+                        continue
+                    candidate = {
+                        "statement": statement,
+                        "evidence": evidence,
+                        "support_level": str(row.get("support_level", "")).strip(),
+                        "claim_strength": str(row.get("claim_strength", "")).strip(),
+                        "certainty_class": str(row.get("certainty_class", "UNCERTAIN")).strip().upper() or "UNCERTAIN",
+                        "source_kind": "action_plan",
+                    }
+                    break
+
+        if candidate is None:
             return None
-        statement = str(first.get("text", "")).strip()
-        evidence = str(first.get("evidence", "")).strip()
-        if not statement:
-            return None
-        if not evidence or evidence not in transcript_clean:
-            evidence = self._recover_evidence({"statement": statement, "evidence": [statement]}, transcript_clean)
-        if not evidence:
-            return None
+
+        statement = str(candidate.get("statement", "")).strip()
+        evidence = str(candidate.get("evidence", "")).strip()
+        support_level = str(candidate.get("support_level", "")).strip()
+        claim_strength = str(candidate.get("claim_strength", "")).strip()
+        certainty_class = str(candidate.get("certainty_class", "UNCERTAIN")).strip().upper() or "UNCERTAIN"
+
+        has_exact_transcript_support = bool(evidence and evidence in transcript_clean)
+        intelligence_direct = support_level == "DIRECTLY_SUPPORTED" or claim_strength == "direct"
+        if has_exact_transcript_support or intelligence_direct:
+            fallback_support_level = "DIRECTLY_SUPPORTED"
+            fallback_claim_strength = "direct"
+            fallback_confidence = "medium"
+            fallback_evidence_confidence = 1.0
+        else:
+            fallback_support_level = "WEAK_INFERENCE"
+            fallback_claim_strength = "weak"
+            fallback_confidence = "low"
+            fallback_evidence_confidence = 0.6
+
         rec: dict[str, Any] = {
             "decision_id": "",
             "statement": statement,
             "state": "tentative",
             "decision_status": "tentative",
             "impact_level": "medium",
-            "confidence": "low",
+            "confidence": fallback_confidence,
             "primary_owner": "",
             "owners": [{"actor": "", "ownership_type": "missing_owner"}],
             "commitments": [],
@@ -1008,13 +1131,13 @@ class DecisionIntelligenceV2Service:
             ],
             "timeline_signals": [],
             "evidence": [evidence],
-            "support_level": "WEAK_INFERENCE",
-            "claim_strength": "weak",
-            "certainty_class": str(first.get("certainty_class", "UNCERTAIN")).strip().upper() or "UNCERTAIN",
+            "support_level": fallback_support_level,
+            "claim_strength": fallback_claim_strength,
+            "certainty_class": certainty_class,
             "evidence_span": evidence,
             "evidence_start_index": transcript_clean.find(evidence),
             "evidence_end_index": transcript_clean.find(evidence) + len(evidence),
-            "evidence_confidence": 0.6,
+            "evidence_confidence": fallback_evidence_confidence,
             "owner_confidence": 0.0,
         }
         rec = self._extract_timeline_signals(rec, transcript_clean)
@@ -1904,6 +2027,10 @@ class DecisionIntelligenceV2Service:
         )
         return families >= 3 and separators >= 2
 
+    def _contains_explicit_commitment_marker(self, statement: str, evidence_text: str = "") -> bool:
+        merged = " ".join([str(statement or "").lower(), str(evidence_text or "").lower()])
+        return any(marker in merged for marker in DECISION_EXPLICIT_COMMITMENT_MARKERS)
+
     def _is_specific_actionable_decision(self, rec: dict[str, Any]) -> bool:
         statement = str(rec.get("statement", "")).strip()
         if not statement:
@@ -1916,6 +2043,10 @@ class DecisionIntelligenceV2Service:
             return False
         has_action_verb = any(verb in lowered for verb in DECISION_ACTIONABLE_VERBS)
         has_explicit_decision = any(verb in lowered for verb in DECISION_EXPLICIT_VERBS)
+        explicit_commitment_marker = self._contains_explicit_commitment_marker(
+            statement,
+            " ".join(str(ev) for ev in rec.get("evidence", []) if isinstance(ev, str)),
+        )
         has_commitment = any(
             isinstance(cmt, dict)
             and str(cmt.get("commitment", "")).strip()
@@ -1923,7 +2054,9 @@ class DecisionIntelligenceV2Service:
             for cmt in rec.get("commitments", [])
         )
         has_owner = bool(str(rec.get("primary_owner", "")).strip())
-        return (has_explicit_decision or has_action_verb) and (has_commitment or has_action_verb or has_owner)
+        return (has_explicit_decision or has_action_verb or explicit_commitment_marker) and (
+            has_commitment or has_action_verb or explicit_commitment_marker or has_owner
+        )
 
     def _clean_clause(self, text: str) -> str:
         value = " ".join(str(text or "").strip().split())
@@ -2171,6 +2304,7 @@ class DecisionIntelligenceV2Service:
             rows = []
         stats: dict[str, int | float] = {
             "total_candidates": len(rows),
+            "pre_grounding_count": len(rows),
             "rejected_no_evidence": 0,
             "rejected_low_confidence": 0,
             "rejected_invalid": 0,
@@ -2179,6 +2313,9 @@ class DecisionIntelligenceV2Service:
             "refined_count": 0,
             "split_count": 0,
             "owner_unassigned_count": 0,
+            "post_non_actionable_filter_count": 0,
+            "post_grounding_count": 0,
+            "post_conflict_dedup_count": 0,
             "final_accepted": 0,
             "min_confidence_threshold": self._decision_min_confidence_threshold(),
         }
@@ -2211,6 +2348,7 @@ class DecisionIntelligenceV2Service:
                 if not self._is_specific_actionable_decision(split_rec):
                     stats["rejected_invalid"] += 1
                     continue
+                stats["post_non_actionable_filter_count"] += 1
 
                 confidence_score, confidence_label = self._score_decision_confidence(split_rec, evidence_snippets)
                 if confidence_score < threshold or confidence_label == DECISION_LABEL_LOW:
@@ -2246,8 +2384,10 @@ class DecisionIntelligenceV2Service:
                 enriched["confidence_label"] = confidence_label
                 accepted.append(enriched)
 
+        stats["post_grounding_count"] = len(accepted)
         deduped, rejected_conflict = self._resolve_conflicting_duplicates(accepted)
         stats["rejected_conflict"] = rejected_conflict
+        stats["post_conflict_dedup_count"] = len(deduped)
         stats["final_accepted"] = len(deduped)
         payload["decision_records"] = deduped
         return payload, stats
